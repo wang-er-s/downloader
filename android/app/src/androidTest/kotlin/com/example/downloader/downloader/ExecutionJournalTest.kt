@@ -18,12 +18,12 @@ class ExecutionJournalTest : Instrumentation() {
     override fun onStart() {
         val output = Bundle()
         try {
-            for (test in listOf(::testHandshakePersistenceReplayAndAck, ::testIdentityPayloadAndRollback, ::testConcurrentAllocationGateAcrossConnections)) {
+            for (test in listOf(::testHandshakePersistenceReplayAndAck, ::testIdentityPayloadAndRollback, ::testConcurrentAllocationGateAcrossConnections, ::testMaterialRegistrationAndClosedCheckpoint, ::testMaterialInsertFailureCreatesNothing, ::testV1MigrationAndFailurePreserveHistory)) {
                 name = "journal-test-${UUID.randomUUID()}.db"
                 journal = ExecutionJournal(targetContext, name)
                 try { test() } finally { journal.close() }
             }
-            output.putString("stream", "PASS 3 real Android SQLite tests")
+            output.putString("stream", "PASS 6 real Android SQLite tests")
             finish(Activity.RESULT_OK, output)
         } catch (error: Throwable) {
             output.putString("stream", error.stackTraceToString())
@@ -52,6 +52,13 @@ class ExecutionJournalTest : Instrumentation() {
                 "commandId" to id,
                 "ownerSessionId" to session,
                 "expectedReceiptVersion" to version,
+                "input" to mapOf(
+                    "protocolVersion" to 1,
+                    "key" to key.json(),
+                    "url" to "http://127.0.0.1:1/",
+                    "stagingLocation" to "private",
+                    "directory" to mapOf("version" to 1, "platform" to "android", "kind" to "systemDownloads", "displayName" to "Downloads"),
+                ),
             )
         return NativeCommand(method, id, key, session, version, payload)
     }
@@ -66,6 +73,98 @@ class ExecutionJournalTest : Instrumentation() {
         } catch (error: EngineProtocolException) {
             assertEquals(reason, error.reason)
         }
+    }
+
+    fun testMaterialRegistrationAndClosedCheckpoint() {
+        val original = command()
+        val mutableInput = EngineProtocol.map(original.payload["input"]).toMutableMap()
+        val c = original.copy(payload = original.payload.toMutableMap().apply { put("input", mutableInput) })
+        journal.register(c, "s")
+        val worker = journal.newTransfer(c, "s")
+        rejects("commandPayloadChanged") { worker.run(c.key, "http://127.0.0.1:2/") }
+        assertTrue(journal.inspectMaterials(c.key).isEmpty())
+        val stop = HttpTransfer.Stop().apply { request(HttpTransfer.Stop.Reason.PAUSE) }
+        mutableInput["url"] = "http://127.0.0.1:2/"
+        val staged = worker.run(c.key, "http://127.0.0.1:1/", stop)
+        mutableInput["url"] = "http://127.0.0.1:1/"
+        assertEquals(HttpTransfer.Stop.Reason.PAUSE, staged.stop)
+        assertEquals(0L, staged.bytes)
+        assertEquals(staged.file.path, journal.inspectMaterials(c.key).single().first)
+        assertTrue(staged.file.exists())
+        try {
+            worker.run(c.key, "http://127.0.0.1:1/", stop)
+            fail("reused allocation callback")
+        } catch (error: HttpTransfer.Failure) {
+            assertEquals("materialAllocationUnknown", (error.cause as EngineProtocolException).reason)
+            assertTrue(!error.material.exists())
+        }
+        val directory = staged.file.parentFile!!
+        val otherId = UUID.randomUUID().toString()
+        val candidate = java.io.File(directory, "$otherId.part")
+        val candidateFacts = java.io.File(directory, "$otherId.facts")
+        rejects("materialAllocationUnknown") { journal.registerMaterials(c, "s", candidate, candidateFacts) }
+        rejects("staleSession") { journal.registerMaterials(c, "foreign-session", candidate, candidateFacts) }
+        rejects("materialOwnership") {
+            journal.registerMaterials(c, "s", java.io.File(targetContext.cacheDir, "$otherId.part"), candidateFacts)
+        }
+        assertTrue(!candidate.exists() && !candidateFacts.exists())
+        val receipt = journal.complete(c, "s", NativeCheckpoint("paused", staged.bytes, resumeSupport = "unsupported", resumeRef = staged.file.name, stagingLocation = staged.file.path))
+        journal.close()
+        journal = ExecutionJournal(targetContext, name)
+        assertEquals(receipt, journal.inspect().single())
+        assertEquals(staged.file.path, journal.inspectMaterials(c.key).single().first)
+        try {
+            journal.newTransfer(c, "s").run(c.key, "http://127.0.0.1:1/", stop)
+            fail("completed command allocated again")
+        } catch (error: HttpTransfer.Failure) {
+            assertEquals("commandAlreadyCompleted", (error.cause as EngineProtocolException).reason)
+            assertTrue(!error.material.exists())
+        }
+    }
+
+    fun testMaterialInsertFailureCreatesNothing() {
+        val c = command()
+        journal.register(c, "s")
+        journal.writableDatabase.execSQL("CREATE TRIGGER fail_material BEFORE INSERT ON materials BEGIN SELECT RAISE(ABORT,'material injection'); END")
+        try {
+            journal.newTransfer(c, "s").run(c.key, "http://127.0.0.1:1/")
+            fail("injection ignored")
+        } catch (error: HttpTransfer.Failure) {
+            assertTrue(error.cause is android.database.sqlite.SQLiteException)
+            assertTrue(!error.material.exists())
+            assertTrue(!java.io.File(error.material.path.replace(".part", ".facts")).exists())
+        }
+        assertTrue(journal.inspectMaterials(c.key).isEmpty())
+        rejects("commandOutcomeUnknown") { journal.register(c, "s") }
+    }
+
+    fun testV1MigrationAndFailurePreserveHistory() {
+        val c = command()
+        journal.register(c, "s")
+        val receipt = journal.complete(c, "s", NativeCheckpoint("paused", 23))
+        // Reconstruct exactly the three v1 tables with their committed history.
+        journal.writableDatabase.execSQL("DROP TABLE materials")
+        journal.writableDatabase.version = 1
+        journal.close()
+        journal = ExecutionJournal(targetContext, name)
+        assertEquals(receipt, journal.inspect().single())
+        assertEquals(2, journal.writableDatabase.version)
+        assertTrue(journal.inspectMaterials(c.key).isEmpty())
+        assertEquals(receipt, journal.register(c, "s"))
+        // A conflicting table forces migration failure. Old user_version/history survive.
+        journal.writableDatabase.version = 1
+        journal.close()
+        journal = ExecutionJournal(targetContext, name)
+        try { journal.inspect(); fail("migration must fail") }
+        catch (_: android.database.sqlite.SQLiteException) { }
+        journal.close()
+        android.database.sqlite.SQLiteDatabase.openDatabase(targetContext.getDatabasePath(name).path, null, 0).use { db ->
+            assertEquals(1, db.version)
+            db.rawQuery("SELECT COUNT(*) FROM receipts", null).use { it.moveToFirst(); assertEquals(1, it.getInt(0)) }
+            db.execSQL("DROP TABLE materials")
+        }
+        journal = ExecutionJournal(targetContext, name)
+        assertEquals(receipt, journal.inspect().single())
     }
 
     fun testHandshakePersistenceReplayAndAck() {

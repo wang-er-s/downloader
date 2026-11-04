@@ -10,7 +10,9 @@ import org.json.JSONObject
 internal class ExecutionJournal(
     context: Context,
     name: String = "android_execution_v1.db",
-) : SQLiteOpenHelper(context.applicationContext, name, null, 1) {
+) : SQLiteOpenHelper(context.applicationContext, name, null, 2) {
+    private val privateRoot = context.applicationContext.filesDir.canonicalFile
+
     override fun onConfigure(db: SQLiteDatabase) {
         db.execSQL("PRAGMA foreign_keys=ON")
         db.execSQL("PRAGMA synchronous=FULL")
@@ -24,13 +26,108 @@ internal class ExecutionJournal(
         db.execSQL(
             "CREATE TABLE receipts (engine TEXT NOT NULL, generation INTEGER NOT NULL, version INTEGER NOT NULL CHECK(version>0), payload TEXT NOT NULL, PRIMARY KEY(engine,generation,version), FOREIGN KEY(engine,generation) REFERENCES executions(engine,generation))",
         )
+        createMaterials(db)
     }
 
     override fun onUpgrade(
         db: SQLiteDatabase,
         oldVersion: Int,
         newVersion: Int,
-    ): Unit = throw EngineProtocolException("protocolMismatch", "journalVersion")
+    ) {
+        // SQLiteOpenHelper wraps this migration and user_version update in one transaction.
+        // Never rewrite the v1 tables or discard an old database on failure.
+        if (oldVersion != 1 || newVersion != 2) {
+            throw EngineProtocolException("protocolMismatch", "journalVersion")
+        }
+        createMaterials(db)
+    }
+
+    private fun createMaterials(db: SQLiteDatabase) {
+        db.execSQL(
+            "CREATE TABLE materials (command_id TEXT PRIMARY KEY NOT NULL REFERENCES commands(id), task TEXT NOT NULL, engine TEXT NOT NULL, generation INTEGER NOT NULL, payload_path TEXT NOT NULL UNIQUE, facts_path TEXT NOT NULL UNIQUE, FOREIGN KEY(engine,generation) REFERENCES executions(engine,generation))",
+        )
+    }
+
+    /** Internal worker path only. Caller must register the command once before running.
+     * This does not schedule work or complete a command; the Service coordinator is still gated.
+     */
+    fun newTransfer(
+        command: NativeCommand,
+        session: String,
+    ): HttpTransfer {
+        // Copy nested input now: a caller retaining mutable codec maps cannot reauthorize run.
+        val captured = EngineProtocol.command(command.method, decode(encode(command.payload)))
+        if (captured.commandId != command.commandId || captured.key != command.key ||
+            captured.ownerSessionId != command.ownerSessionId ||
+            captured.expectedReceiptVersion != command.expectedReceiptVersion
+        ) conflict("commandPayloadChanged")
+        if (captured.method != "enqueue") conflict("materialAllocationUnavailable")
+        val url = EngineProtocol.string(EngineProtocol.map(captured.payload["input"]), "url")
+        return HttpTransfer(privateRoot, url) { key, payload, facts ->
+            if (key != captured.key) conflict("staleExecution")
+            registerMaterials(captured, session, payload, facts)
+        }
+    }
+
+    /** Allocation intent only: does NOT authorize resume, deletion, or a durable byte checkpoint.
+     * Called before CREATE_NEW for either material. Unknown intents are retained indefinitely.
+     */
+    fun registerMaterials(
+        command: NativeCommand,
+        session: String,
+        payload: java.io.File,
+        facts: java.io.File,
+    ) = transaction { db ->
+        if (command.ownerSessionId != session) conflict("staleSession")
+        if (command.method != "enqueue") conflict("materialAllocationUnavailable")
+        val current = execution(db, command.key) ?: conflict("staleExecution")
+        if (current.first != command.expectedReceiptVersion) conflict("staleReceipt")
+        db.rawQuery("SELECT MAX(generation) FROM executions WHERE task=?", arrayOf(command.key.taskId)).use {
+            it.moveToFirst()
+            if (it.getLong(0) != command.key.generation) conflict("staleExecution")
+        }
+        val encoded = encode(mapOf("method" to command.method, "arguments" to command.payload))
+        db.rawQuery("SELECT payload,result FROM commands WHERE id=?", arrayOf(command.commandId)).use {
+            if (!it.moveToFirst() || it.getString(0) != encoded) conflict("commandPayloadChanged")
+            if (!it.isNull(1)) conflict("commandAlreadyCompleted")
+        }
+        val directory = java.io.File(privateRoot, "http_staging_v1")
+        val id = payload.name.removeSuffix(".part")
+        if (payload.name != "$id.part" || facts.name != "$id.facts" ||
+            !id.matches(Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")) ||
+            directory != directory.canonicalFile ||
+            java.nio.file.Files
+                .isSymbolicLink(directory.toPath()) ||
+            payload.absoluteFile.parentFile != directory || facts.absoluteFile.parentFile != directory ||
+            payload.exists() || facts.exists() ||
+            java.nio.file.Files
+                .isSymbolicLink(payload.toPath()) ||
+            java.nio.file.Files
+                .isSymbolicLink(facts.toPath())
+        ) {
+            conflict("materialOwnership")
+        }
+        // One allocation per command; even a prior attempt with no file must be inspected,
+        // never used as permission to allocate another file and restart a transfer.
+        db.rawQuery("SELECT command_id FROM materials WHERE command_id=?", arrayOf(command.commandId)).use {
+            if (it.moveToFirst()) conflict("materialAllocationUnknown")
+        }
+        db.execSQL(
+            "INSERT INTO materials(command_id,task,engine,generation,payload_path,facts_path) VALUES(?,?,?,?,?,?)",
+            arrayOf<Any>(command.commandId, command.key.taskId, command.key.engineId, command.key.generation, payload.path, facts.path),
+        )
+    }
+
+    /** Diagnostic ownership intents; non-destructive and never an enqueue/recovery source. */
+    fun inspectMaterials(key: ExecutionKey): List<Pair<String, String>> =
+        transaction { db ->
+            execution(db, key) ?: conflict("staleExecution")
+            db
+                .rawQuery(
+                    "SELECT payload_path,facts_path FROM materials WHERE task=? AND engine=? AND generation=? ORDER BY command_id",
+                    arrayOf(key.taskId, key.engineId, key.generation.toString()),
+                ).use { rows -> buildList { while (rows.moveToNext()) add(rows.getString(0) to rows.getString(1)) } }
+        }
 
     // SQLite's write transaction is also the allocation gate across helper instances.
     // Rollback errors are suppressed onto the original failure, never replacing it.
@@ -129,7 +226,10 @@ internal class ExecutionJournal(
                 "INSERT INTO receipts(engine,generation,version,payload) VALUES(?,?,?,?)",
                 arrayOf<Any>(key.engineId, key.generation, version, payload),
             )
-            db.execSQL("UPDATE executions SET version=? WHERE engine=? AND generation=?", arrayOf<Any>(version, key.engineId, key.generation))
+            db.execSQL(
+                "UPDATE executions SET version=? WHERE engine=? AND generation=?",
+                arrayOf<Any>(version, key.engineId, key.generation),
+            )
             db.execSQL("UPDATE commands SET result=? WHERE id=?", arrayOf(payload, command.commandId))
             receipt
         }

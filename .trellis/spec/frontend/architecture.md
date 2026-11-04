@@ -165,13 +165,13 @@ Future<void> pause(String taskId) async {
 
 ### 1. Scope / Trigger
 
-适用于 AndroidEngineChannels、EngineProtocol、ExecutionJournal 及 Dart AndroidEngine 调用方。2026-11-04 协议代码、实际 Kotlin 编译、五项 JVM 协议测试和 Dart 桥接 94 项测试通过；另有内部 HttpTransfer 的11项主机真实 HTTP 测试通过，边界见后文。三项 Android SQLite instrumentation 仅编译。服务集成、安全续传及设备生命周期仍未实现或未验收。
+适用于 AndroidEngineChannels、EngineProtocol、ExecutionJournal 及 Dart AndroidEngine 调用方。协议与 Dart 桥接已通过局部检查；2026-11-04 材料门独立复核通过 JVM 19项（协议5＋HTTP14）及实际 Kotlin 编译。六项 Android SQLite instrumentation 仅编译，尚未设备运行；服务集成、安全续传及设备生命周期仍未实现或未验收。
 
 ### 2. Signatures
 
 通道为 `downloader/android_engine` 和 `downloader/android_engine/events`，所有请求含 `protocolVersion=1`。inspect 请求仅版本，返回 `{protocolVersion,ownerSessionId,sequence,receipts}`；当前无事件生产者，sequence=0。命令携带扁平执行键、commandId、ownerSessionId、expectedReceiptVersion；enqueue 额外使用 `input=EngineTask.toJson()`，嵌套 key 必须匹配。ack 使用扁平执行键、receiptVersion 和 releaseResumeRefs。
 
-日志入口：`register(command,session)`、`complete(command,session,checkpoint)`、`inspect()`、`acknowledge(ack)`；独立 `android_execution_v1.db` v1 包含 executions/commands/receipts，不打开 AppStore。
+日志入口：`register(command,session)`、`newTransfer(command,session): HttpTransfer`、`registerMaterials(command,session,payload,facts)`、`inspectMaterials(key)`、`complete(command,session,checkpoint)`、`inspect()`、`acknowledge(ack)`；独立 `android_execution_v1.db` 的 user_version=2，包含 executions/commands/receipts/materials，不打开 AppStore。
 
 ### 3. Contracts
 
@@ -179,6 +179,9 @@ Future<void> pause(String taskId) async {
 - SQLite 写事务原子登记执行身份与 NULL 未知命令结果；complete 原子分配递增回执并保存命令结果。相同 commandId/规范化载荷回放，不同载荷拒绝；NULL 结果不自动重执行。
 - 原生 ack 仅验证已有回执/身份/高水位，当前拒绝全部显式材料释放并保守留历史。Dart AndroidEngine 还需先核对 AppStore 已提交的完整确认和现存同版本业务回执；确认期间重读任务与回执，不能仅信任调用参数。
 - 原生类型验证只接受 Int/Long 计数，拒绝负数、未知版本、控制字符、非法名称及不匹配嵌套 key。材料定位形态校验不等于路径归属授权。
+- v1→v2 只新增 materials(command_id PRIMARY KEY、task、engine、generation、payload_path UNIQUE、facts_path UNIQUE)，分别外键引用 command 和 execution；完整归属仍在事务内核验。SQLiteOpenHelper 同事务迁移及更新 user_version，失败保留 v1 历史，不支持的版本拒绝，不删库重建。
+- `newTransfer` 深复制并重新解析完整命令，固定授权 URL；run 在建立目录前拒绝更换 URL。分配事务重查会话、完整 pending 命令/result=NULL、完整执行键、最新代次及期望版本，验证 UUID 双文件和私有父目录；一个 command 只能登记一次，既有意图不能授权重下。
+- materials 意图提交后才创建 facts/part 和请求网络；`inspectMaterials` 只读归属，不授予恢复、删除或重传权。分配后的 stop/终态竞争须由后续 Service 单执行协调队列解决，当前没有生产调度入口。
 - 真实 SQLite 事务/版本/磁盘故障尚待设备验证；回滚失败附加到原异常，绝不删库重建。
 
 ### Android Dart 桥接补充
@@ -194,7 +197,8 @@ Future<void> pause(String taskId) async {
 | 条件 | 当前行为 |
 | --- | --- |
 | 未知方法/版本/类型/非法输入 | protocolMismatch |
-| 旧会话、执行键、版本或改 commandId 载荷 | stateConflict，并保留结构化 reason |
+| 旧会话、执行键、版本或改 commandId 载荷；worker 更换 URL | stateConflict，并保留结构化 reason；URL 更换在目录/材料创建前拒绝 |
+| 非 pending 命令、重复材料分配或非私有 UUID 双文件 | 拒绝分配，不创建材料或请求网络；未知分配保留供查询 |
 | 传输方法通过解析和会话检查 | stateConflict / transferUnavailable；无伪造网络或暂停成功 |
 | 非空 releaseResumeRefs | stateConflict / materialReleaseUnavailable；不推进水位、不删文件 |
 | SQLite/JSON 失败 | persistenceFailure；保留原生诊断，不伪造空快照 |
@@ -207,7 +211,7 @@ Future<void> pause(String taskId) async {
 
 ### 6. Tests Required
 
-独立 Gradle `:app:testDebugUnitTest :app:compileDebugAndroidTestKotlin` 通过；五项 JVM 测试含 64 位/null、控制字符及保留名称断言。三项 SQLite 测试覆盖重开/确认、回滚与竞争，但没有连接设备，不能计通过。Dart 桥接独立复核及父代理顺序复跑 flutter analyze 干净、flutter test 94/94（基础48 + 桥接46）；包含真实主机 SQLite 的确认竞争、初始事件和显式重新同步。后续补真实通道/重连、未知原生库版本/磁盘错误、材料释放、服务/HTTP 及 API29/30/33/35/36 生命周期矩阵。
+独立 Gradle `:app:testDebugUnitTest :app:compileDebugAndroidTestKotlin` 通过；JVM 19项（协议5＋HTTP14）无失败、错误或跳过。六项 SQLite instrumentation 覆盖重开/确认、回滚/竞争、材料登记/拒绝、v1→v2迁移及失败保留历史，但没有设备运行，不能计通过；新增可变输入隔离、同 worker 重用和迟到旧代次断言亦仅编译。Dart 未改，本轮沿用先前顺序复跑 flutter analyze 干净及 flutter test 94/94（基础48＋桥接46），不声称重跑。后续补真实通道/重连、未知库版本/磁盘错误、材料释放、服务及 API29/30/33/35/36 生命周期矩阵。
 
 ### 7. Wrong vs Correct
 
@@ -223,14 +227,14 @@ Future<void> pause(String taskId) async {
 
 ### 2. Signatures
 
-`HttpTransfer(appFiles: File).run(key: ExecutionKey, url: String, stop: Stop, onSample: (Sample) -> Unit): Staged`；Sample 含 bytes:Long、total:Long?、monotonicMs:Long。Staged 含 file、bytes、total、effectiveUrl、stop:Stop.Reason?、sha256。`Stop.request(PAUSE|CANCEL)` 只请求停止；`resume()` 明确抛 stateConflict/restartRequired。
+`HttpTransfer(appFiles: File, authorizedUrl: String? = null, onAllocation: (ExecutionKey,File,File) -> Unit).run(key: ExecutionKey, url: String, stop: Stop, onSample: (Sample) -> Unit): Staged`；onAllocation 必须显式提供，生产仅通过 `ExecutionJournal.newTransfer(command,session)` 注入，测试才使用诊断 no-op。Sample 含 bytes:Long、total:Long?、monotonicMs:Long。Staged 含 file、bytes、total、effectiveUrl、stop:Stop.Reason?、sha256。`Stop.request(PAUSE|CANCEL)` 只请求停止；`resume()` 明确抛 stateConflict/restartRequired。
 
 ### 3. Contracts
 
-- 根目录只能由原生 Context.filesDir 注入，拒绝 Dart 路径授权、根别名与 symlink 暂存目录。随机 UUID facts/part 排他 CREATE_NEW+NOFOLLOW_LINKS；先 force 身份意图再创建 payload，不打开旧 partial，不覆盖现有文件。依赖私有 sandbox 排除恶意同 UID 目录替换，不声称完全 TOCTOU 安全。
+- 根目录只能由原生 Context.filesDir 注入，拒绝 Dart 路径授权、根别名与 symlink 暂存目录。固定命令/URL后，先在 ExecutionJournal 提交 UUID facts/part 归属，再以 CREATE_NEW+NOFOLLOW_LINKS 排他创建；先 force 身份意图再创建 payload，不打开旧 partial、不覆盖现有文件。登记失败不创建双文件或请求网络，空 staging 目录可已存在。依赖私有 sandbox 排除恶意同 UID 目录替换，不声称完全 TOCTOU 安全。
 - 默认 HTTPS 校验；HTTP identity、15s连接/30s读取、最多10跳重定向，每跳重新校验无认证 http/https 并检测循环。仅新下载200；已知长度严格验证，未知长度仍发真实累计字节。64KiB流缓冲、增量 SHA-256，周期 force 至多每秒，不重扫全文件。
 - request 返回不是停止屏障；调用方等待 run 真正退出及 force/close 成功，再提交 ExecutionJournal 回执。输出关闭后固定一次终态停止原因，facts 与返回使用同一快照；晚到取消由 Service 的取消优先意图协调。取消目前只停止保留，不代表清理成功。
-- facts 仅为诊断材料，不是持久恢复证明。原生日志联动、目录 fsync/重启归属、安全 Range/prefix/candidate 恢复及受控释放均待实现。staged 只表示完整私有暂存，未发布用户目标。
+- facts 仅为诊断材料，不是持久恢复证明。原生日志已提供分配意图门，但没有生产 worker/事件/服务；目录 fsync/重启归属、安全 Range/prefix/candidate 恢复及受控释放仍待实现。staged 只表示完整私有暂存，未发布用户目标。
 
 ### 4. Validation & Error Matrix
 
@@ -250,7 +254,7 @@ Future<void> pause(String taskId) async {
 
 ### 6. Tests Required
 
-独立 Gradle 编译及JUnit16项（协议5＋HTTP11）、flutter analyze、diff检查通过。[真实Socket测试](../../../android/app/src/test/kotlin/com/example/downloader/downloader/HttpTransferTest.kt)覆盖字节/散列、未知长度、重定向、短EOF、编码/长度异常、真实阻塞停止、symlink与sentinel、连接失败和消费者异常。大长度仅声明4294967419、实际5字节，不是超过4GiB传输证明。Android TLS、连接/响应头阻塞停止、force/close故障、目录fsync/重启恢复及设备矩阵尚未验证；后续服务集成须独立验证。
+独立 Gradle 编译及JUnit19项（协议5＋HTTP14）通过，新增登记失败零材料/零请求、分配先于真实HTTP、URL替换零分配回归。[真实Socket测试](../../../android/app/src/test/kotlin/com/example/downloader/downloader/HttpTransferTest.kt)覆盖字节/散列、未知长度、重定向、短EOF、编码/长度异常、真实阻塞停止、symlink与sentinel、连接失败和消费者异常。本轮无 Dart 改动，未重复先前已通过的 analyze/94项 Dart 测试。大长度仅声明4294967419、实际5字节，不是超过4GiB传输证明。Android TLS、连接/响应头阻塞停止、force/close故障、目录fsync/重启恢复及设备矩阵尚未验证；后续服务集成须独立验证。
 
 ### 7. Wrong vs Correct
 

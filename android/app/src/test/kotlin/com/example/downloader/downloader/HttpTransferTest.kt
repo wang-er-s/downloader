@@ -16,6 +16,62 @@ class HttpTransferTest {
     private fun root(): File = Files.createTempDirectory("http-core-test").toFile().canonicalFile
     private fun hash(bytes: ByteArray) = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 
+    @Test fun boundUrlCannotBeReplacedBeforeAllocation() {
+        val root = root()
+        var calls = 0
+        try {
+            val worker = HttpTransfer(root, "http://127.0.0.1:1/") { _, _, _ -> calls++ }
+            try { worker.run(key, "http://127.0.0.1:2/"); fail() }
+            catch (error: EngineProtocolException) { assertEquals("commandPayloadChanged", error.reason) }
+            assertEquals(0, calls)
+            assertTrue(root.list()!!.isEmpty())
+        } finally { root.deleteRecursively() }
+    }
+
+    @Test fun allocationFailurePreventsFilesAndNetworkAndPreservesFirstCause() {
+        val root = root()
+        val failure = java.io.IOException("journal unavailable")
+        try {
+            var allocation: Pair<File, File>? = null
+            val worker = HttpTransfer(root) { actualKey, payload, facts ->
+                assertEquals(key, actualKey)
+                assertFalse(payload.exists())
+                assertFalse(facts.exists())
+                allocation = payload to facts
+                throw failure
+            }
+            try { worker.run(key, "http://127.0.0.1:1/"); fail() }
+            catch (error: HttpTransfer.Failure) {
+                assertSame(failure, error.cause)
+                assertEquals(allocation!!.first, error.material)
+                assertEquals(0L, error.bytes)
+            }
+            assertTrue(File(root, "http_staging_v1").list()!!.isEmpty())
+        } finally { root.deleteRecursively() }
+    }
+
+    @Test fun allocationPrecedesExclusiveCreationAndRealRequest() = server { server, base ->
+        val root = root()
+        var allocation: Pair<File, File>? = null
+        server.createContext("/registered") { exchange ->
+            val registered = allocation ?: error("network before registration")
+            assertTrue(registered.first.exists())
+            assertTrue(registered.second.exists())
+            exchange.sendResponseHeaders(200, 1)
+            exchange.responseBody.use { it.write(42) }
+        }
+        try {
+            val result = HttpTransfer(root) { actualKey, payload, facts ->
+                assertEquals(key, actualKey)
+                assertFalse(payload.exists())
+                assertFalse(facts.exists())
+                allocation = payload to facts
+            }.run(key, "$base/registered")
+            assertEquals(allocation!!.first, result.file)
+            assertEquals(1L, result.bytes)
+        } finally { root.deleteRecursively() }
+    }
+
     // Raw loopback HTTP avoids Android's restricted java.base compilation surface.
     private class Headers : java.util.TreeMap<String, String>(String.CASE_INSENSITIVE_ORDER) {
         fun add(name: String, value: String) { put(name, value) }
@@ -78,7 +134,7 @@ class HttpTransferTest {
         }
         val root = root()
         try {
-            val worker = HttpTransfer(root)
+            val worker = HttpTransfer(root) { _, _, _ -> }
             val one = worker.run(key, "$base/bytes")
             val two = worker.run(key, "$base/bytes")
             assertNotEquals(one.file, two.file)
@@ -112,7 +168,7 @@ class HttpTransferTest {
         val samples = java.util.Collections.synchronizedList(mutableListOf<HttpTransfer.Sample>())
         try {
             val task = executor.submit<HttpTransfer.Staged> {
-                HttpTransfer(root).run(key, "$base/chunked") { samples.add(it); sample.countDown() }
+                HttpTransfer(root, onAllocation = { _, _, _ -> }).run(key, "$base/chunked") { samples.add(it); sample.countDown() }
             }
             assertTrue(firstWritten.await(5, TimeUnit.SECONDS))
             assertTrue(sample.await(5, TimeUnit.SECONDS))
@@ -139,7 +195,7 @@ class HttpTransferTest {
         for (i in 0..10) redirect("/r$i", if (i == 10) "/ok" else "/r${i + 1}")
         val root = root()
         try {
-            val worker = HttpTransfer(root)
+            val worker = HttpTransfer(root) { _, _, _ -> }
             assertEquals("$base/ok", worker.run(key, "$base/start").effectiveUrl)
             for ((path, reason) in listOf("loop" to "redirectLoop", "auth" to "invalidHttpUrl",
                 "file" to "invalidHttpUrl", "r0" to "tooManyRedirects")) {
@@ -165,7 +221,7 @@ class HttpTransferTest {
         val root = root()
         try {
             var observedTotal: Long? = null
-            try { HttpTransfer(root).run(key, "http://127.0.0.1:${socket.localPort}/") { observedTotal = it.total }; fail() }
+            try { HttpTransfer(root, onAllocation = { _, _, _ -> }).run(key, "http://127.0.0.1:${socket.localPort}/") { observedTotal = it.total }; fail() }
             catch (e: HttpTransfer.Failure) {
                 assertEquals(5L, e.bytes)
                 assertEquals("short", e.material.readText())
@@ -186,7 +242,7 @@ class HttpTransferTest {
         try {
             for (reason in HttpTransfer.Stop.Reason.entries) {
                 val stop = HttpTransfer.Stop()
-                val result = HttpTransfer(root).run(key, "$base/stream", stop) { stop.request(reason) }
+                val result = HttpTransfer(root, onAllocation = { _, _, _ -> }).run(key, "$base/stream", stop) { stop.request(reason) }
                 assertEquals(reason, result.stop)
                 assertTrue(result.bytes > 0)
                 assertEquals(result.bytes, result.file.length())
@@ -204,13 +260,13 @@ class HttpTransferTest {
         val sentinel = File(outside, "keep").apply { writeText("untouched") }
         try {
             Files.createSymbolicLink(File(root, "http_staging_v1").toPath(), outside.toPath())
-            try { HttpTransfer(root).run(key, "http://127.0.0.1:1/"); fail() }
+            try { HttpTransfer(root, onAllocation = { _, _, _ -> }).run(key, "http://127.0.0.1:1/"); fail() }
             catch (_: IllegalArgumentException) { }
             assertEquals("untouched", sentinel.readText())
             assertEquals(listOf("keep"), outside.list()!!.toList())
             val alias = File(outside, "alias")
             Files.createSymbolicLink(alias.toPath(), root.toPath())
-            try { HttpTransfer(alias).run(key, "http://127.0.0.1:1/"); fail() }
+            try { HttpTransfer(alias, onAllocation = { _, _, _ -> }).run(key, "http://127.0.0.1:1/"); fail() }
             catch (_: IllegalArgumentException) { }
         } finally { File(root, "http_staging_v1").delete(); File(outside, "alias").delete(); root.deleteRecursively(); outside.deleteRecursively() }
     }
@@ -219,12 +275,12 @@ class HttpTransferTest {
         server.createContext("/denied") { it.sendResponseHeaders(403, -1); it.close() }
         val root = root()
         try {
-            try { HttpTransfer(root).run(key, "$base/denied"); fail() } catch (e: HttpTransfer.Failure) {
+            try { HttpTransfer(root, onAllocation = { _, _, _ -> }).run(key, "$base/denied"); fail() } catch (e: HttpTransfer.Failure) {
                 assertEquals("httpStatus:403", e.cause!!.message)
                 assertTrue(e.material.exists())
             }
             val port = ServerSocket(0).use { it.localPort }
-            try { HttpTransfer(root).run(key, "http://127.0.0.1:$port/"); fail() } catch (e: HttpTransfer.Failure) {
+            try { HttpTransfer(root, onAllocation = { _, _, _ -> }).run(key, "http://127.0.0.1:$port/"); fail() } catch (e: HttpTransfer.Failure) {
                 assertTrue(e.cause is java.net.ConnectException)
                 assertTrue(e.material.exists())
             }
@@ -239,7 +295,7 @@ class HttpTransferTest {
         }
         val root = root()
         try {
-            try { HttpTransfer(root).run(key, "$base/excess"); fail() }
+            try { HttpTransfer(root, onAllocation = { _, _, _ -> }).run(key, "$base/excess"); fail() }
             catch (error: HttpTransfer.Failure) {
                 assertEquals("lengthExceeded", error.cause!!.message)
                 assertEquals(0L, error.bytes)
@@ -264,7 +320,7 @@ class HttpTransferTest {
         val root = root()
         try {
             for ((path, _, _) in cases) {
-                try { HttpTransfer(root).run(key, "$base/$path"); fail(path) }
+                try { HttpTransfer(root, onAllocation = { _, _, _ -> }).run(key, "$base/$path"); fail(path) }
                 catch (error: HttpTransfer.Failure) {
                     assertEquals(if (path == "encoding") "unexpectedEncoding" else "invalidLength", error.cause!!.message)
                     assertEquals(0L, error.bytes)
@@ -282,7 +338,7 @@ class HttpTransferTest {
         try {
             val stop = HttpTransfer.Stop()
             try {
-                HttpTransfer(root).run(key, "$base/bytes", stop) {
+                HttpTransfer(root, onAllocation = { _, _, _ -> }).run(key, "$base/bytes", stop) {
                     stop.request(HttpTransfer.Stop.Reason.PAUSE)
                     throw java.io.IOException("checkpointConsumerFailed")
                 }
@@ -309,7 +365,7 @@ class HttpTransferTest {
             val stop = HttpTransfer.Stop()
             val sampled = CountDownLatch(1)
             val task = executor.submit<HttpTransfer.Staged> {
-                HttpTransfer(root).run(key, "$base/blocked", stop) { sampled.countDown() }
+                HttpTransfer(root, onAllocation = { _, _, _ -> }).run(key, "$base/blocked", stop) { sampled.countDown() }
             }
             assertTrue(sampled.await(3, TimeUnit.SECONDS))
             // The server withholds EOF and further bytes until after both stop barriers.

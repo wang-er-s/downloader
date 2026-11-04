@@ -89,3 +89,25 @@ flutter analyze、flutter test；在 android/ 下运行 ./gradlew :app:testDebug
 - 顺序运行 `flutter analyze`：No issues found（10.8s），日志 `/tmp/android-engine-http-check-analyze.log`；Dart未改，未重复94项Dart测试。`git diff --check` 通过，日志 `/tmp/android-engine-http-check-diff.log`。未暂存、提交或改任务状态；最终只修改允许的HttpTransfer、其测试和本任务design/implement，保护文件哈希复核匹配。
 - 本轮局部 PASS，无剩余局部阻断；Android完整验收仍 BLOCK。真实设备的 HttpURLConnection/TLS/停止延迟（包括连接及响应头阻塞）、默认TLS证书失败、磁盘force/close故障尚未注入；3项真实Android SQLite测试仅编译，不能计运行通过。当前大长度证据仅 Content-Length=4294967419、实际5字节短EOF，不是真实>4GiB传输。facts仅诊断，目录fsync、重启材料归属和崩溃恢复未实现；私有sandbox排除同UID恶意目录替换，不能称完全TOCTOU安全。
 - 下轮门槛：Service脱离Activity/Dart、串行命令与终态及取消优先协调；等待实际退出/关闭/持久日志再交付回执；安全Range/强验证器/prefix与candidate恢复；归属登记和受控清理；通知/权限/系统时限、禁止自动传输及API29/30/33/35/36设备矩阵。不得直接把此构件接为已验收生产DownloadEngine或勾完整PRD。
+
+## 材料登记前置检查点（2026-11-04，Service目标未完成）
+
+- 为避免越过材料安全门，本轮按授权降为真实内部路径检查点；未实现/接通Service、worker协调或真实事件，通道继续transferUnavailable，未改MainActivity/manifest/Dart/共享DTO/业务库/源规范/依赖/任务状态。HttpTransfer只新增必须显式提供的分配回调，先原生日志事务再创建facts/part；原force/close及首异常传播保持。
+- ExecutionJournal v2仅新增materials；1→2迁移不改v1三表，原库保留。newTransfer使用原生filesDir注入registerMaterials，核对当前会话、已登记pending命令完整载荷、最新执行代次和expectedReceiptVersion、私有UUID材料对；每命令最多一次分配，未知意图不自动重试。inspectMaterials只读取，不触发网络、不授权恢复或释放。
+- 新增2项主机真实核心断言：登记故障在创建/网络前传播同一首异常，回调看到两个尚未创建的定位；真实HTTP服务确认请求发生于分配完成与排他创建之后。原HTTP11项保持，总JUnit18项（协议5+HTTP13）0 failures/errors/skipped。
+- 新增3项Android SQLite instrumentation：已登记材料/停止关闭后真实paused回执与重开保留、重复/旧会话/越界分配拒绝；材料INSERT故障无文件且命令未知不重提；v1迁移保留回执/幂等结果与迁移失败保留user_version=1和历史，修复冲突后重开迁移。合计6项仅编译，未连接设备运行，不计通过。测试暂停为预先停止、无网络路径，不冒充设备活动传输暂停。
+- 最终 `cd android && JAVA_HOME='/Applications/Android Studio.app/Contents/jbr/Contents/Home' ./gradlew -Pandroid.builder.sdkDownload=false :app:testDebugUnitTest :app:compileDebugAndroidTestKotlin` 成功，日志 `/tmp/android-engine-service-gradle-verified.log`；顺序flutter analyze成功（`/tmp/android-engine-service-analyze-final.log`），diff --check成功（`/tmp/android-engine-service-diff.log`）。Dart未改，未重跑94项。
+- 根目录首次误运行gradlew退出127，已纠正android目录。附加assembleDebug尝试两次各60s超时，中止时未得到成功结果；不计构建通过，日志 `/tmp/android-engine-service-gradle-final.log`、`/tmp/android-engine-service-assemble.log`。未安装SDK/改许可证/启动AVD。父提供的/tmp/android-engine-http-review-cv4dts85/manifest.json本会话不存在；通过git状态/差异核对保护文件无新增修改，保留既有.pi两文件和docs。未stage/commit/push/archive，暂存区为空。
+- 残留：尚无串行协调/最多两worker、当前进程用户提交队列令牌、多版本worker回执/EngineEvent、真正pause命令等待、取消先持久意图及取消优先/清理、重启waitingRecovery本地对齐、Service/FGS权限通知/timeout。resume保持restartRequired，ack拒绝材料释放，staged不标completed。没有目录fsync，崩溃可丢目录项；意图仅说明归属分配，不认证bytes/prefix。未知孤儿不删。安全206、发布、磁盘force/close故障、进程强杀及API29/30/33/35/36设备矩阵均未实现/未测，不勾PRD。
+
+## 材料门独立复核补充（2026-11-04）
+
+独立复核修复 newTransfer 原先只绑定 key、允许 run 替换 URL 的缺口：工厂深复制并重新解析完整命令，固定授权 URL，run 在创建目录前拒绝替换 URL；材料事务仍在延迟执行时核验 pending/当前代次/版本，重复调用同一工厂回调不能再次分配。补充主机 URL 替换零分配测试，以及 instrumentation 的输入变更隔离、同 worker 重用和迟到旧代次拒绝断言。后者仅编译，未在设备运行。
+
+此门只保证分配事务当时的授权：登记提交与创建/网络之间仍需后续 Service 单执行协调队列，串行处理 stop 命令和终态；不能视作活动暂停、取消优先或重启恢复已验收。目录 fsync、prefix 认证、设备 SQLite/迁移故障实测均未完成；保留材料且无自动重试。独立 JVM 19项（协议5＋HTTP14）与 AndroidTest Kotlin 编译通过；PRD保持未勾选。
+
+## 材料门规范同步与检查点提交
+
+- 父代理核对自动修复后 ExecutionJournal.kt：额外变化仅 Kotlin 换行，完整命令深复制/URL固定与材料事务逻辑保持。再次执行 Gradle 单测及 AndroidTest Kotlin 编译，BUILD SUCCESSFUL（3s）；JUnit XML 协议5＋HTTP14，失败/错误/跳过均0，日志 `/tmp/android-material-parent-gradle.log`。先前误设 context-mode 超时的尝试无完成结果，不计通过。
+- 同步 frontend index/architecture 与源设计中的 v2 materials、分配前登记、固定命令/URL、测试数量及设备未测边界；验证链接、围栏、尾换行和 diff --check。检查点仅纳入四个 Kotlin 实现/测试文件、任务 design/implement、上述三份规范；排除既有 .pi 配置与 docs 图片。不归档，不勾 PRD。
+- 下一轮目标为真实 Service/协调器入口：捕获已校验当前会话命令，串行登记/终态、最多两活动 worker、已持久取消意图优先、pause 等待真实退出及持久回执、事件持久后交付；重开只读取，不重传。安全 resume 与受控材料释放未闭合前继续明确拒绝，不用伪成功补齐。

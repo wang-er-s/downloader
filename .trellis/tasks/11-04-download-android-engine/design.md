@@ -45,3 +45,17 @@ ack 先在真实 AppStore 短事务读取并核对完整持久 ReceiptAck，不�
 Stop.request(PAUSE/CANCEL)仅请求并disconnect；调用者须等待 run 真正退出，文件关闭及终态facts成功后才能提交回执。取消暂保留材料，不等于取消清理完成；后续Service需串行协调命令、停止与journal回执，并在明确归属释放后才对外完成cancel。网络读被停止中断可形成停止结果，输入close、文件/检查点错误仍传播，不能用finally认证失败检查点。输出关闭后固定一次终态停止原因，facts与返回结果使用同一快照；此边界之后到达的停止请求由后续Service按已完成的暂存结果与取消优先意图协调，不回改既有终态。
 
 续传本轮明确 unsupported：resume() 返回 stateConflict/restartRequired，不打开或修改原件，不发HEAD/Range。完整安全GET/ETag/Content-Range/prefix认证与candidate恢复日志未实现；原生通道继续 transferUnavailable。Service、权限、事件/ExecutionJournal联动、恢复/清理和目标发布留后轮；此构件不得直接接为生产DownloadEngine。
+
+## 材料安全门检查点（2026-11-04，Service仍未接通）
+
+- 独立执行库升级到v2，保留原库名称及v1 executions/commands/receipts内容，仅新增materials：完整执行键、command_id、排他payload/facts路径。SQLiteOpenHelper事务内执行1→2迁移，未知版本拒绝，失败保留旧版本和历史，不删库重建。
+- HttpTransfer构造现在必须显式提供onAllocation；运行前先调用该回调，成功返回后才CREATE_NEW facts/part并请求网络。生产内部入口为ExecutionJournal.newTransfer(command,session)，使用原生Context.filesDir及registerMaterials验证会话、完整命令载荷、pending结果、最新代次/期望版本、UUID双文件与私有父目录。命令必须已register；每命令只登记一次分配，已有意图不能授权重下。主机核心测试显式用no-op回调，仅诊断测试，不是生产恢复授权。
+- 可审查内部调用链：register(command,session) → newTransfer(command,session).run(key,url,stop) → 事务登记材料 → 排他创建与真实HTTP/停止关闭屏障 → 调用方complete提交真实checkpoint。newTransfer本身不调度、不完成命令、不自动网络重试；它也不替代未来协调器当前进程用户授权令牌。
+- inspectMaterials仅非破坏读取归属意图；无文件不推定可重新分配，有文件不推定可恢复/可删除。facts仍仅诊断。未实现目录fsync，崩溃可能丢失目录项；数据库意图存在不保证文件存在，未知孤儿保留，不能猜删除。
+- 本检查点不接Service/通道；transferUnavailable、材料释放拒绝及resume restartRequired保持。尚缺多次worker回执分配/EngineEvent、当前进程队列授权、串行协调与两worker、暂停命令等待、持久取消优先及清理协议、重启waitingRecovery对齐、FGS权限/通知/timeout与设备证据。不得勾PRD或宣称前台服务已完成。
+
+## 材料门独立复核补充（2026-11-04）
+
+独立复核修复 newTransfer 原先只绑定 key、允许 run 替换 URL 的缺口：工厂深复制并重新解析完整命令，固定授权 URL，run 在创建目录前拒绝替换 URL；材料事务仍在延迟执行时核验 pending/当前代次/版本，重复调用同一工厂回调不能再次分配。补充主机 URL 替换零分配测试，以及 instrumentation 的输入变更隔离、同 worker 重用和迟到旧代次拒绝断言。后者仅编译，未在设备运行。
+
+此门只保证分配事务当时的授权：登记提交与创建/网络之间仍需后续 Service 单执行协调队列，串行处理 stop 命令和终态；不能视作活动暂停、取消优先或重启恢复已验收。目录 fsync、prefix 认证、设备 SQLite/迁移故障实测均未完成；保留材料且无自动重试。独立 JVM 19项（协议5＋HTTP14）与 AndroidTest Kotlin 编译通过；PRD保持未勾选。
