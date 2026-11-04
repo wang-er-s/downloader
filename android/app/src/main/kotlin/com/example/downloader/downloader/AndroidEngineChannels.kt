@@ -60,6 +60,11 @@ internal object AndroidEngineRuntime {
                 ownerSessionId,
                 executor,
                 object : TransferCoordinator.Journal {
+                    override fun beginCancel(command: NativeCommand, worker: NativeCommand?, checkpoint: NativeCheckpoint?) =
+                        log.beginCancel(command, ownerSessionId, worker, checkpoint)
+
+                    override fun finishCancel(command: NativeCommand) = log.finishCancel(command, ownerSessionId)
+
                     override fun register(command: NativeCommand) = log.register(command, ownerSessionId)
 
                     override fun accept(command: NativeCommand) = log.acceptWorker(command, ownerSessionId)

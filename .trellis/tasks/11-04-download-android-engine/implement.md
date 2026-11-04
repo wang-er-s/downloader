@@ -257,3 +257,30 @@ frontend architecture/index与源design同步v5双候选表、inspectCandidate�
 - frontend index/architecture 与源 design 已同步公开 resume 生产链、v6 三表/迁移、冻结 source N 与 worker N+1、显式旧授权退休、branch晋升、持久stop/staged门、历史终态幂等和resume本地补存；任务 design 记录复核结论。
 - 本轮按既有直接提交授权仅提交本任务原生实现/测试、任务 design/implement 和三份规范；排除既有 .pi agent 修改与 docs/。这是检查点，不勾PRD、不归档，父任务仍1/7。
 - 下一轮先核对既有取消/ack调用方，设计停止后且归属明确的材料释放、持久清理意图和部分删除幂等；普通ack不释放、旧确认不删新材料、失败保持可追踪与可重放，不从未知路径猜删。设备矩阵与真实SQLite验收继续BLOCK。
+
+## v7 生产取消与归属清理检查点（本轮，等待独立复核）
+
+- 已接生产 channel.cancel→同 Runtime 串行 Coordinator→beginCancel 持久意图/完整原生归属快照→CANCEL→真实 run 退出与终态提交→finishCancel 整集合预检/逐成员清理→持久成功回执；无 Work 的 paused/failed/旧进程显式取消只本地退休旧授权和清理，不创建 Service/GET。未知 NULL 命令不重执行，完整重复命令只等待原退出或恢复本地清理。非 cancel 的 terminalSavePending 必须原 enqueue/resume/pause 显式补存，再以真实新 head 取消，拒绝由未核验 cancel 触发补存。
+- 日志 v7 新增 cancel_cleanups/cancel_cleanup_members，保留 v1–v6。commands.result 冻结接受事实；清理完成结果单独不可变，瞬时清理/最终保存失败保留 pending 与完整成员及 done 标记，登记 missing 可重放。v6 历史 cleanupFailure 不重写，需要当前 session/head 新 cancel；旧确认不授予新材料删除权。全部原件/facts、已登记 candidate/facts 来自原生日志并重核完整 key/源归属。全集合 canonical 私有目录/UUID配对/NOFOLLOW普通文件检查先于任一删除，未知孤儿不碰。
+- 实际 stop/close/Journal 错误保留到终态 error，初次 cancel 不伪成功，finishCancel 拒绝带真实停止错误的 head。持久 cancel 阻止迟到 proof/staged，finished/retired 阻止旧 callback 再认证；终态补存及历史分支幂等既有测试保留。事件只在数据库提交后发出。非空 ack 继续保守拒绝：缺原生日志可核验的发布完成/确认重下意图，当前 publishing 只是私有 staged。Dart 与共享 AppStore/接口未改，原生仍是可信调用方边界。
+- 最终 android/ 既有 JBR 执行 ./gradlew -Pandroid.builder.sdkDownload=false :app:testDebugUnitTest :app:compileDebugAndroidTestKotlin :app:assembleDebug 正常退出0，BUILD SUCCESSFUL，/tmp/android-cleanup-verified-final.log。86项JVM（Protocol5+HTTP20+Coordinator28+Lifecycle7+Resume23+Cleanup3）全0 failure/error/skipped。新增生产 active cancel 真socket等待退出后删除/重复等待与重放、queued零worker取消/意图与清理失败重试、无Work旧Runtime显式取消零launch并保留未知孤儿；核心覆盖最后一项非法/文件与目录symlink零删除、部分删除IO故障和missing幂等。Coordinator Journal明确为host fake，不当SQLite证据。
+- Android SQLite instrumentation从18增至20，仅编译未运行：v6→v7保留/第二DDL失败原子回滚；真实表级清理意图触发器失败零删除/旧回执保留、原件与copying candidate完整集合/源归属、stop未finished拒绝、重开零清理、symlink零删除、最终receipt触发器失败pending与missing重放、commands接受结果不变及重复完成结果。既有迁移fixture更新至v7。尚未新增v7跨连接清理竞争设备断言；Runtime生产串行边界为当前排他依据。
+- flutter analyze正常退出No issues found，/tmp/android-cleanup-analyze.log。Dart未改，未重跑前轮独立102项。adb devices -l无设备；未启AVD/安装SDK/改license。早期Kotlin SQL混合参数类型编译失败（first/second日志）已修正，fourth日志新增测试因非canonical临时根/非法空URL夹具2失败，修正夹具后最终86通过；不将这些失败或超时记成功。
+- protected.json 10项实际SHA256全MATCH（含既有.pi修改与docs图片），git diff --check通过，暂存空；未stage/commit/push/archive/改task.json/PRD/源规范/frontend规范/Gradle/manifest/共享模型/其他平台。新增与修改仅授权Kotlin包/JVM/androidTest及本任务design/implement。
+- 本轮是可审查生产取消最小闭环，不是完整Android验收。完整PRD/平台仍BLOCK；需要独立审查及设备SQLite/Service/通道/权限/kill/API29/30/33/35/36、真实force/close/磁盘故障、目录fsync与同UID并发替换保证、真实>4GiB和用户目录发布。非空release ack分支未开放；v7跨连接清理竞争/所有generation组合及取消close错误完整入口矩阵未逐项新增，保留既有核心安全回归。
+
+## v7取消与受控清理独立复核（2026-11-04，源码局部PASS／设备与完整PRD仍BLOCK）
+
+- 已按check.jsonl六项、PRD、任务design/implement及完整实施report独立审查本轮九文件和真实调用链；源规范仍为已通过v6，未同步或改PRD/task.json。核对自动格式化之外的语义差异，未放开非空release ack、发布或确认重下分支。
+- 修复cleanupMembers的恢复归属缺口：此前先按resume命令key跳过，可能遗漏source root属于本key但命令key冲突的已登记candidate。现任一归属边关联本key就必须双向一致；candidate_checkpoints若存在，其resume/source/facts须与operation一致。扩展既有SQLite测试，验证beginCancel嵌套事务在归属失败时全回滚、零删除，finishCancel重新核验后才删除；这20项instrumentation仍仅编译。
+- 修复活动cancel完整重放用Map.equals误拒绝Int/Long等价载荷，复用原终态补存的递归语义比较，仍由Journal核对持久完整载荷。新增真实socket/file回归：活动cancel终态提交失败保留配对材料、错误session/期望版本不补存、Int/Long等价重放及两个串行重试只本地完成/固定结果，HTTP=1、launch=1；Journal明确host fake。另新增生产Coordinator→真实ResumeTransfer复制取消伴随真实close helper抛错，终态保留fileWriteFailure，原件/candidate保留且不调用成功清理。
+- 最终Gradle完整命令在android/和既有JBR下、sdkDownload=false正常退出0，/tmp/android-cleanup-check-gradle-final3.log，BUILD SUCCESSFUL in3s。最终XML88=Protocol5+HTTP20+Coordinator30+Lifecycle7+Resume23+Cleanup3，failure/error/skipped全0；AndroidTest Kotlin编译与debug APK构建通过。首轮86通过；新增补存测试首次等待精确8192进度超时（TCP分片及进度合并不保证该样本），改等待首个正字节持久事件后通过，失败日志/tmp/android-cleanup-check-gradle-final.log保留。此后final2为87通过，新增close回归后final3为88通过。
+- flutter analyze正常退出0、No issues found（1.4s），/tmp/android-cleanup-check-analyze.log。Dart未改，沿用前轮独立102项，未重跑flutter test；adb devices -l为空，未装SDK/改license/启AVD。SQLite迁移/触发器/并发与Service/通道设备结果不由源码或编译代替。
+- 父提供review备份594文件清单除本次授权Journal/Coordinator及其测试、本任务记录外保持一致；protected10实际路径SHA256全MATCH，git diff --check干净，暂存空。未stage/commit/push/archive或改源规范/frontend/.pi/docs/其他平台/共享DTO/依赖/配置。
+- 当前v7生产取消源码局部PASS，无剩余已知本轮源码阻断；完整Android/PRD保持BLOCK且不勾。只承诺单Runtime串行门与诚实sandbox；文件集合不原子、无目录fsync或恶意同UID替换保证。v7跨连接清理竞争、全部generation/故障组合、设备SQLite/Service/权限/强杀/API29/30/33/35/36、实际磁盘force/close故障、真实>4GiB和用户目录发布仍未验收。Repository未实现，不能称取消项已从业务列表移除；最终验收由父代理保留。
+
+## v7 父代理核对、规范同步与检查点（2026-11-04）
+
+- 检查进程在1800000ms上限终止，但指定完整报告及结构化acceptance已保存；父代理直接核对报告、最终JUnit XML88项全0、Gradle/analyze日志与源码，不将超时状态本身当通过，也未重复运行已完成检查。
+- 核对cleanupMembers双向归属、beginCancel/finishCancel持久清单及OwnedMaterialCleanup整集合校验；规范index/architecture与源design同步为v7，保留20项SQLite仅编译和设备/完整PRD BLOCK。
+- 检查点只提交本轮原生实现/测试、任务design/implement及三份规范；不包含既有.pi修改与docs下任何路径，不stage未知docs/.trellis产物。不归档、不勾PRD。后续优先取得真实Android SQLite/Service设备证据；用户目录发布由file-storage任务承接，不能以本地清理通过跳过平台安全门。

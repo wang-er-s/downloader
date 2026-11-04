@@ -18,12 +18,12 @@ class ExecutionJournalTest : Instrumentation() {
     override fun onStart() {
         val output = Bundle()
         try {
-            for (test in listOf(::testHandshakePersistenceReplayAndAck, ::testIdentityPayloadAndRollback, ::testConcurrentAllocationGateAcrossConnections, ::testMaterialRegistrationAndClosedCheckpoint, ::testMaterialInsertFailureCreatesNothing, ::testV1MigrationAndFailurePreserveHistory, ::testWorkerLifecycleAndStopAuthorization, ::testV2MigrationPreservesUnknownCommands, ::testWorkerCommandBindingAndCancelCannotBeRevoked, ::testUnknownVersionPreservesHistory, ::testTerminalSaveRollbackAndIdempotentRetry, ::testProductionForcedCheckpointAndV3Migration, ::testV3MigrationFailurePreservesHistory, ::testCancelledWorkerCannotPromoteOrRecoverProof, ::testV4CandidateProofMigrationRetainsHistory, ::testPublicResumeAtomicVersionAndRetirement, ::testV5MigrationRollback, ::testPublicPersistedCancelBlocksProofAndLateStaging)) {
+            for (test in listOf(::testHandshakePersistenceReplayAndAck, ::testIdentityPayloadAndRollback, ::testConcurrentAllocationGateAcrossConnections, ::testMaterialRegistrationAndClosedCheckpoint, ::testMaterialInsertFailureCreatesNothing, ::testV1MigrationAndFailurePreserveHistory, ::testWorkerLifecycleAndStopAuthorization, ::testV2MigrationPreservesUnknownCommands, ::testWorkerCommandBindingAndCancelCannotBeRevoked, ::testUnknownVersionPreservesHistory, ::testTerminalSaveRollbackAndIdempotentRetry, ::testProductionForcedCheckpointAndV3Migration, ::testV3MigrationFailurePreservesHistory, ::testCancelledWorkerCannotPromoteOrRecoverProof, ::testV4CandidateProofMigrationRetainsHistory, ::testPublicResumeAtomicVersionAndRetirement, ::testV5MigrationRollback, ::testPublicPersistedCancelBlocksProofAndLateStaging, ::testCancelCleanupReopenOwnershipAndRollback, ::testV6CleanupMigrationRollback)) {
                 name = "journal-test-${UUID.randomUUID()}.db"
                 journal = ExecutionJournal(targetContext, name)
                 try { test() } finally { journal.close() }
             }
-            output.putString("stream", "PASS 18 real Android SQLite tests")
+            output.putString("stream", "PASS 20 real Android SQLite tests")
             finish(Activity.RESULT_OK, output)
         } catch (error: Throwable) {
             output.putString("stream", error.stackTraceToString())
@@ -73,6 +73,91 @@ class ExecutionJournalTest : Instrumentation() {
         } catch (error: EngineProtocolException) {
             assertEquals(reason, error.reason)
         }
+    }
+
+    fun testCancelCleanupReopenOwnershipAndRollback() {
+        val c = command(); journal.register(c, "s"); journal.acceptWorker(c, "s")
+        val directory = java.io.File(targetContext.filesDir.canonicalFile, "http_staging_v1").apply { mkdirs() }
+        val id = UUID.randomUUID().toString()
+        val part = java.io.File(directory, "$id.part"); val facts = java.io.File(directory, "$id.facts")
+        journal.registerMaterials(c, "s", part, facts); part.writeText("prefix-tail"); facts.writeText("facts")
+        val proof = ForcedMaterial(c.key, part, 4, 20, "http://127.0.0.1:1/", "\"strong\"", NativePrefixDigest.read(part, 4).snapshot())
+        journal.saveResumeCheckpoint(c, "s", proof)
+        val ref = journal.inspectResume(c.key)!!.ref
+        val recovery = command("registered-candidate", 1, method = "resume")
+        journal.register(recovery, "s")
+        val candidateId = UUID.randomUUID().toString()
+        val candidate = java.io.File(directory, "$candidateId.part").apply { writeText("partial") }
+        val candidateFacts = java.io.File(directory, "$candidateId.facts").apply { writeText("facts") }
+        journal.writableDatabase.execSQL("INSERT INTO recovery_operations(id,resume_command,source_ref,candidate,phase) VALUES(?,?,?,?,?)", arrayOf(candidateId, recovery.commandId, ref, candidate.path, "copying"))
+        journal.writableDatabase.execSQL("INSERT INTO recovery_candidate_files(operation_id,facts_path) VALUES(?,?)", arrayOf(candidateId, candidateFacts.path))
+        val cancel = command("cancel-v7", 1, method = "cancel")
+        // Foreign command -> this root must reject, rather than silently omit its candidate.
+        val originalRecovery = ExecutionJournal.encode(mapOf("method" to recovery.method, "arguments" to recovery.payload))
+        val foreignRecovery = ExecutionJournal.encode(mapOf("method" to recovery.method,
+            "arguments" to (recovery.payload + ("taskId" to "foreign") + ("engineId" to "foreign"))))
+        journal.writableDatabase.execSQL("UPDATE commands SET payload=? WHERE id=?", arrayOf(foreignRecovery, recovery.commandId))
+        rejects("materialOwnership") { journal.beginCancel(cancel, "s", c, NativeCheckpoint("cancelling", 11)) }
+        assertTrue(part.exists()); assertTrue(candidate.exists()); assertEquals(1, journal.inspect().size)
+        journal.writableDatabase.execSQL("UPDATE commands SET payload=? WHERE id=?", arrayOf(originalRecovery, recovery.commandId))
+        // Both proof and operation have valid FKs; an inconsistent facts edge is still forbidden.
+        journal.writableDatabase.execSQL(
+            "INSERT INTO candidate_checkpoints(operation_id,resume_command,source_ref,source_version,receipt_version,offset,total,url,etag,digest,algorithm,facts_path) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            arrayOf<Any>(candidateId, recovery.commandId, ref, 1, 1, 4, 20, proof.effectiveUrl, proof.etag, proof.prefixDigest, proof.algorithm, facts.path))
+        rejects("materialOwnership") { journal.beginCancel(cancel, "s", c, NativeCheckpoint("cancelling", 11)) }
+        assertTrue(part.exists()); assertTrue(candidate.exists()); assertEquals(1, journal.inspect().size)
+        journal.writableDatabase.execSQL("DELETE FROM candidate_checkpoints WHERE operation_id=?", arrayOf(candidateId))
+        journal.writableDatabase.execSQL("CREATE TRIGGER fail_cleanup BEFORE INSERT ON cancel_cleanup_members BEGIN SELECT RAISE(ABORT,'injected'); END")
+        try { journal.beginCancel(cancel, "s", c, NativeCheckpoint("cancelling", 11)); fail("intent must roll back") } catch (_: android.database.sqlite.SQLiteException) { }
+        assertTrue(part.exists()); assertEquals(1, journal.inspect().size)
+        journal.writableDatabase.execSQL("DROP TRIGGER fail_cleanup")
+        val accepted = journal.beginCancel(cancel, "s", c, NativeCheckpoint("cancelling", 11))
+        rejects("transferUnavailable") { journal.finishCancel(cancel, "s") }
+        journal.finishWorker(c, "s", NativeCheckpoint("cancelling", 11, error = mapOf("code" to "cleanupFailure")), null)
+        journal.close(); journal = ExecutionJournal(targetContext, name)
+        journal.inspect(); assertTrue(part.exists()) // open/read does not clean
+        journal.writableDatabase.execSQL("UPDATE commands SET payload=? WHERE id=?", arrayOf(foreignRecovery, recovery.commandId))
+        rejects("materialOwnership") { journal.finishCancel(cancel, "s") }
+        assertTrue(part.exists()); assertTrue(candidate.exists())
+        journal.writableDatabase.execSQL("UPDATE commands SET payload=? WHERE id=?", arrayOf(originalRecovery, recovery.commandId))
+        val outside = java.io.File(targetContext.cacheDir, "cleanup-sentinel-${UUID.randomUUID()}").apply { writeText("sentinel") }
+        facts.delete(); java.nio.file.Files.createSymbolicLink(facts.toPath(), outside.toPath())
+        try { journal.finishCancel(cancel, "s"); fail("symlink must reject whole collection") } catch (error: EngineProtocolException) { assertEquals("cleanupFailure", error.code) }
+        assertTrue(part.exists()); assertEquals("sentinel", outside.readText())
+        java.nio.file.Files.delete(facts.toPath()); facts.writeText("facts")
+        journal.writableDatabase.execSQL("CREATE TRIGGER fail_cleanup_receipt BEFORE INSERT ON receipts BEGIN SELECT RAISE(ABORT,'injected final save'); END")
+        try { journal.finishCancel(cancel, "s"); fail("final save must fail") } catch (_: android.database.sqlite.SQLiteException) { }
+        assertTrue(!part.exists() && !candidate.exists()) // registered missing files can finish locally
+        journal.writableDatabase.rawQuery("SELECT result,phase FROM cancel_cleanups WHERE command_id=?", arrayOf(cancel.commandId)).use { it.moveToFirst(); assertTrue(it.isNull(0)); assertEquals("pending", it.getString(1)) }
+        journal.writableDatabase.execSQL("DROP TRIGGER fail_cleanup_receipt")
+        journal.close(); journal = ExecutionJournal(targetContext, name)
+        val done = journal.finishCancel(cancel, "s")
+        assertTrue(!part.exists() && !facts.exists() && !candidate.exists() && !candidateFacts.exists()); assertNull(done["error"])
+        assertEquals(accepted, journal.register(cancel, "s"))
+        assertEquals(done, journal.finishCancel(cancel, "s"))
+        rejects("materialReleaseUnavailable") { journal.acknowledge(NativeAck(c.key, done["receiptVersion"] as Long, listOf("unknown"))) }
+        outside.delete()
+    }
+
+    fun testV6CleanupMigrationRollback() {
+        val c = command(); journal.register(c, "s")
+        val receipt = journal.complete(c, "s", NativeCheckpoint("paused", 0))
+        val db = journal.writableDatabase
+        db.execSQL("DROP TABLE cancel_cleanup_members"); db.execSQL("DROP TABLE cancel_cleanups"); db.version = 6
+        journal.close(); journal = ExecutionJournal(targetContext, name)
+        assertEquals(7, journal.writableDatabase.version); assertEquals(receipt, journal.inspect().single())
+        journal.writableDatabase.execSQL("DROP TABLE cancel_cleanups") // second DDL conflicts
+        journal.writableDatabase.version = 6
+        journal.close(); journal = ExecutionJournal(targetContext, name)
+        try { journal.inspect(); fail("migration must fail") } catch (_: android.database.sqlite.SQLiteException) { }
+        journal.close()
+        android.database.sqlite.SQLiteDatabase.openDatabase(targetContext.getDatabasePath(name).path, null, 0).use { old ->
+            assertEquals(6, old.version)
+            old.rawQuery("SELECT COUNT(*) FROM sqlite_master WHERE name='cancel_cleanups'", null).use { it.moveToFirst(); assertEquals(0, it.getInt(0)) }
+            old.execSQL("DROP TABLE cancel_cleanup_members")
+        }
+        journal = ExecutionJournal(targetContext, name)
+        assertEquals(receipt, journal.inspect().single()); assertEquals(7, journal.writableDatabase.version)
     }
 
     fun testCancelledWorkerCannotPromoteOrRecoverProof() {
@@ -146,10 +231,11 @@ class ExecutionJournalTest : Instrumentation() {
         val c0 = command("unknown", generation = 0)
         journal.register(c0, "s")
         dropResumeTables(journal.writableDatabase)
+        journal.writableDatabase.execSQL("DROP TABLE IF EXISTS cancel_cleanup_members"); journal.writableDatabase.execSQL("DROP TABLE IF EXISTS cancel_cleanups")
         journal.writableDatabase.version = 3
         journal.close()
         journal = ExecutionJournal(targetContext, name)
-        assertEquals(6, journal.writableDatabase.version)
+        assertEquals(7, journal.writableDatabase.version)
         rejects("commandOutcomeUnknown") { journal.register(c0, "s") }
         java.net.ServerSocket(0).use { server ->
             val responder = Thread {
@@ -228,14 +314,16 @@ class ExecutionJournalTest : Instrumentation() {
         journal.writableDatabase.execSQL("DROP TABLE candidate_checkpoints")
         journal.writableDatabase.execSQL("DROP TABLE recovery_candidate_files")
         dropPublicResumeTables(journal.writableDatabase)
+        journal.writableDatabase.execSQL("DROP TABLE IF EXISTS cancel_cleanup_members"); journal.writableDatabase.execSQL("DROP TABLE IF EXISTS cancel_cleanups")
         journal.writableDatabase.version = 4
         journal.close(); journal = ExecutionJournal(targetContext, name)
-        assertEquals(6, journal.writableDatabase.version)
+        assertEquals(7, journal.writableDatabase.version)
         assertEquals(receipt, journal.inspect().single())
         assertNull(journal.inspectCandidate(c.key, "none"))
         // Version-4 failure must retain its old receipt and version; no rebuild.
         journal.writableDatabase.execSQL("DROP TABLE recovery_candidate_files")
         dropPublicResumeTables(journal.writableDatabase)
+        journal.writableDatabase.execSQL("DROP TABLE IF EXISTS cancel_cleanup_members"); journal.writableDatabase.execSQL("DROP TABLE IF EXISTS cancel_cleanups")
         journal.writableDatabase.version = 4 // second DDL conflicts, first new table must roll back
         journal.close(); journal = ExecutionJournal(targetContext, name)
         try { journal.inspect(); fail("migration must not overwrite") } catch (_: android.database.sqlite.SQLiteException) { }
@@ -256,6 +344,7 @@ class ExecutionJournalTest : Instrumentation() {
         val receipt = journal.complete(c, "s", NativeCheckpoint("paused", 3))
         dropResumeTables(journal.writableDatabase)
         journal.writableDatabase.execSQL("CREATE TABLE recovery_attempts (sentinel TEXT)")
+        journal.writableDatabase.execSQL("DROP TABLE IF EXISTS cancel_cleanup_members"); journal.writableDatabase.execSQL("DROP TABLE IF EXISTS cancel_cleanups")
         journal.writableDatabase.version = 3
         journal.close()
         journal = ExecutionJournal(targetContext, name)
@@ -269,7 +358,7 @@ class ExecutionJournalTest : Instrumentation() {
         }
         journal = ExecutionJournal(targetContext, name)
         assertEquals(receipt, journal.inspect().single())
-        assertEquals(6, journal.writableDatabase.version)
+        assertEquals(7, journal.writableDatabase.version)
     }
 
     fun testUnknownVersionPreservesHistory() {
@@ -362,16 +451,18 @@ class ExecutionJournalTest : Instrumentation() {
         dropResumeTables(journal.writableDatabase)
         journal.writableDatabase.execSQL("DROP TABLE worker_authorizations")
         journal.writableDatabase.execSQL("DROP TABLE materials")
+        journal.writableDatabase.execSQL("DROP TABLE IF EXISTS cancel_cleanup_members"); journal.writableDatabase.execSQL("DROP TABLE IF EXISTS cancel_cleanups")
         journal.writableDatabase.version = 1
         journal.close()
         journal = ExecutionJournal(targetContext, name)
         assertEquals(receipt, journal.inspect().single())
-        assertEquals(6, journal.writableDatabase.version)
+        assertEquals(7, journal.writableDatabase.version)
         assertTrue(journal.inspectMaterials(c.key).isEmpty())
         assertEquals(receipt, journal.register(c, "s"))
         // Fail the SECOND DDL so rollback must undo the newly created materials table.
         dropResumeTables(journal.writableDatabase)
         journal.writableDatabase.execSQL("DROP TABLE materials")
+        journal.writableDatabase.execSQL("DROP TABLE IF EXISTS cancel_cleanup_members"); journal.writableDatabase.execSQL("DROP TABLE IF EXISTS cancel_cleanups")
         journal.writableDatabase.version = 1
         journal.close()
         journal = ExecutionJournal(targetContext, name)
@@ -530,11 +621,13 @@ class ExecutionJournalTest : Instrumentation() {
         val c = command(); journal.register(c, "s")
         val receipt = journal.complete(c, "s", NativeCheckpoint("paused", 0))
         dropPublicResumeTables(journal.writableDatabase)
+        journal.writableDatabase.execSQL("DROP TABLE IF EXISTS cancel_cleanup_members"); journal.writableDatabase.execSQL("DROP TABLE IF EXISTS cancel_cleanups")
         journal.writableDatabase.version = 5
         journal.close(); journal = ExecutionJournal(targetContext, name)
-        assertEquals(6, journal.writableDatabase.version); assertEquals(receipt, journal.inspect().single())
+        assertEquals(7, journal.writableDatabase.version); assertEquals(receipt, journal.inspect().single())
         journal.writableDatabase.execSQL("DROP TABLE resume_sources")
         journal.writableDatabase.execSQL("DROP TABLE retired_workers")
+        journal.writableDatabase.execSQL("DROP TABLE IF EXISTS cancel_cleanup_members"); journal.writableDatabase.execSQL("DROP TABLE IF EXISTS cancel_cleanups")
         journal.writableDatabase.version = 5 // second DDL active_branches conflicts
         journal.close(); journal = ExecutionJournal(targetContext, name)
         try { journal.inspect(); fail("migration should fail") } catch (_: android.database.sqlite.SQLiteException) { }
@@ -568,10 +661,11 @@ class ExecutionJournalTest : Instrumentation() {
         journal.register(c, "s")
         dropResumeTables(journal.writableDatabase)
         journal.writableDatabase.execSQL("DROP TABLE worker_authorizations")
+        journal.writableDatabase.execSQL("DROP TABLE IF EXISTS cancel_cleanup_members"); journal.writableDatabase.execSQL("DROP TABLE IF EXISTS cancel_cleanups")
         journal.writableDatabase.version = 2
         journal.close()
         journal = ExecutionJournal(targetContext, name)
-        assertEquals(6, journal.writableDatabase.version)
+        assertEquals(7, journal.writableDatabase.version)
         rejects("commandOutcomeUnknown") { journal.register(c, "s") }
         assertTrue(journal.inspect().isEmpty())
     }

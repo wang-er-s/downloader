@@ -10,7 +10,7 @@ import org.json.JSONObject
 internal class ExecutionJournal(
     context: Context,
     name: String = "android_execution_v1.db",
-) : SQLiteOpenHelper(context.applicationContext, name, null, 6) {
+) : SQLiteOpenHelper(context.applicationContext, name, null, 7) {
     private val privateRoot = context.applicationContext.filesDir.canonicalFile
 
     override fun onConfigure(db: SQLiteDatabase) {
@@ -31,6 +31,7 @@ internal class ExecutionJournal(
         createResume(db)
         createCandidateProofs(db)
         createResumeWorkers(db)
+        createCleanups(db)
     }
 
     override fun onUpgrade(
@@ -40,14 +41,24 @@ internal class ExecutionJournal(
     ) {
         // SQLiteOpenHelper wraps this migration and user_version update in one transaction.
         // Never rewrite the v1 tables or discard an old database on failure.
-        if (oldVersion !in 1..5 || newVersion != 6) {
+        if (oldVersion !in 1..6 || newVersion != 7) {
             throw EngineProtocolException("protocolMismatch", "journalVersion")
         }
         if (oldVersion == 1) createMaterials(db)
         if (oldVersion <= 2) createWorkers(db)
         if (oldVersion <= 3) createResume(db)
         if (oldVersion <= 4) createCandidateProofs(db)
-        createResumeWorkers(db)
+        if (oldVersion <= 5) createResumeWorkers(db)
+        createCleanups(db)
+    }
+
+    private fun createCleanups(db: SQLiteDatabase) {
+        db.execSQL(
+            "CREATE TABLE cancel_cleanups (command_id TEXT PRIMARY KEY NOT NULL REFERENCES commands(id), task TEXT NOT NULL, engine TEXT NOT NULL, generation INTEGER NOT NULL, intent_version INTEGER NOT NULL, phase TEXT NOT NULL, result TEXT, FOREIGN KEY(engine,generation) REFERENCES executions(engine,generation))",
+        )
+        db.execSQL(
+            "CREATE TABLE cancel_cleanup_members (command_id TEXT NOT NULL REFERENCES cancel_cleanups(command_id), source_id TEXT NOT NULL, payload_path TEXT NOT NULL, facts_path TEXT NOT NULL, payload_done INTEGER NOT NULL DEFAULT 0, facts_done INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(command_id,source_id))",
+        )
     }
 
     private fun createResumeWorkers(db: SQLiteDatabase) {
@@ -615,11 +626,14 @@ internal class ExecutionJournal(
         }, { id ->
             save { db ->
                 validate(db)
-                if (promote) workerStop(db, captured, captured.ownerSessionId)?.let { stop ->
-                    throw ResumeTransfer.Stopped(
-                        if (stop == "cancel") HttpTransfer.Stop.Reason.CANCEL else HttpTransfer.Stop.Reason.PAUSE,
-                        null, material.forced.offset,
-                    )
+                if (promote) {
+                    workerStop(db, captured, captured.ownerSessionId)?.let { stop ->
+                        throw ResumeTransfer.Stopped(
+                            if (stop == "cancel") HttpTransfer.Stop.Reason.CANCEL else HttpTransfer.Stop.Reason.PAUSE,
+                            null,
+                            material.forced.offset,
+                        )
+                    }
                 }
                 db
                     .rawQuery(
@@ -1072,19 +1086,23 @@ internal class ExecutionJournal(
                 }
             if (finishedVersion != null) {
                 execution(db, command.key) ?: conflict("staleExecution")
-                val stored = db.rawQuery(
-                    "SELECT payload FROM receipts WHERE engine=? AND generation=? AND version=?",
-                    arrayOf(command.key.engineId, command.key.generation.toString(), finishedVersion.toString()),
-                ).use {
-                    if (!it.moveToFirst()) conflict("receiptPayload")
-                    decode(it.getString(0))
-                }
+                val stored =
+                    db
+                        .rawQuery(
+                            "SELECT payload FROM receipts WHERE engine=? AND generation=? AND version=?",
+                            arrayOf(command.key.engineId, command.key.generation.toString(), finishedVersion.toString()),
+                        ).use {
+                            if (!it.moveToFirst()) conflict("receiptPayload")
+                            decode(it.getString(0))
+                        }
                 // Recovery fields were derived by the original terminal transaction. A later
                 // worker may advance active_branches; replay must use this receipt's frozen facts.
-                val expected = checkpoint.copy(
-                    resumeSupport = stored["resumeSupport"] as String,
-                    resumeRef = stored["resumeRef"] as String?,
-                ).receipt(command.key, finishedVersion!!)
+                val expected =
+                    checkpoint
+                        .copy(
+                            resumeSupport = stored["resumeSupport"] as String,
+                            resumeRef = stored["resumeRef"] as String?,
+                        ).receipt(command.key, finishedVersion!!)
                 if (encode(stored) != encode(expected)) conflict("receiptPayload")
                 if (pause != null) {
                     if (pause.method != "pause" || pause.key != command.key || pause.ownerSessionId != session) conflict("staleExecution")
@@ -1124,12 +1142,283 @@ internal class ExecutionJournal(
                 }
         }
 
+    /** Snapshot only native-owned material rows, never channel paths or directory scans. */
+    private fun cleanupMembers(
+        db: SQLiteDatabase,
+        key: ExecutionKey,
+    ): List<Triple<String, String, String>> {
+        val members = mutableListOf<Triple<String, String, String>>()
+        db
+            .rawQuery(
+                "SELECT command_id,payload_path,facts_path,task FROM materials WHERE engine=? AND generation=? ORDER BY command_id",
+                arrayOf(key.engineId, key.generation.toString()),
+            ).use {
+                while (it.moveToNext()) {
+                    if (it.getString(3) != key.taskId) conflict("materialOwnership")
+                    val command =
+                        db.rawQuery("SELECT payload FROM commands WHERE id=?", arrayOf(it.getString(0))).use { row ->
+                            if (!row.moveToFirst()) conflict("materialOwnership")
+                            val envelope = decode(row.getString(0))
+                            EngineProtocol.command(envelope["method"] as String, envelope["arguments"])
+                        }
+                    if (command.key != key || command.method != "enqueue") conflict("materialOwnership")
+                    members.add(Triple("material:" + it.getString(0), it.getString(1), it.getString(2)))
+                }
+            }
+        db
+            .rawQuery(
+                "SELECT o.id,o.candidate,f.facts_path,c.payload,m.task,m.engine,m.generation,o.resume_command,o.source_ref FROM recovery_operations o JOIN commands c ON c.id=o.resume_command LEFT JOIN recovery_candidate_files f ON f.operation_id=o.id LEFT JOIN resume_checkpoints r ON r.ref=o.source_ref LEFT JOIN materials m ON m.command_id=r.command_id ORDER BY o.id",
+                null,
+            ).use {
+                while (it.moveToNext()) {
+                    val envelope = decode(it.getString(3))
+                    val owner = EngineProtocol.command(envelope["method"] as String, envelope["arguments"])
+                    val sourceMatches = !it.isNull(4) && it.getString(4) == key.taskId &&
+                        it.getString(5) == key.engineId && it.getLong(6) == key.generation
+                    // Either edge associates this operation with the key. A conflicting edge
+                    // must reject the entire snapshot, never silently omit a registered file.
+                    if (owner.key != key && !sourceMatches) continue
+                    if (owner.key != key || owner.method != "resume" || !sourceMatches || it.isNull(2)) {
+                        conflict("materialOwnership")
+                    }
+                    val operation = it.getString(0)
+                    val facts = it.getString(2)
+                    val resume = it.getString(7)
+                    val source = it.getString(8)
+                    db.rawQuery(
+                        "SELECT resume_command,source_ref,facts_path FROM candidate_checkpoints WHERE operation_id=?",
+                        arrayOf(operation),
+                    ).use { proof ->
+                        if (proof.moveToFirst() && (proof.getString(0) != resume ||
+                                proof.getString(1) != source || proof.getString(2) != facts)) {
+                            conflict("materialOwnership")
+                        }
+                    }
+                    members.add(Triple("candidate:" + operation, it.getString(1), facts))
+                }
+            }
+        return members
+    }
+
+    /** Serial Runtime caller guarantees no other live Work when worker is null. */
+    fun beginCancel(
+        command: NativeCommand,
+        session: String,
+        worker: NativeCommand?,
+        checkpoint: NativeCheckpoint?,
+    ): Map<String, Any?> =
+        transaction { db ->
+            if (command.method != "cancel" || command.ownerSessionId != session) conflict("staleSession")
+            val replay = register(command, session)
+            if (replay != null) {
+                db.rawQuery("SELECT command_id FROM cancel_cleanups WHERE command_id=?", arrayOf(command.commandId)).use {
+                    // v6 failures are immutable: an explicit new cancel may authorize a new operation.
+                    if (!it.moveToFirst()) throw EngineProtocolException("cleanupFailure", "materialReleaseUnavailable")
+                }
+                return@transaction replay
+            }
+            val current = execution(db, command.key) ?: conflict("staleExecution")
+            val head =
+                db
+                    .rawQuery(
+                        "SELECT payload FROM receipts WHERE engine=? AND generation=? AND version=?",
+                        arrayOf(command.key.engineId, command.key.generation.toString(), current.first.toString()),
+                    ).use {
+                        if (!it.moveToFirst()) conflict("staleReceipt")
+                        decode(it.getString(0))
+                    }
+            if (head["publishedLocation"] != null || head["publishOperation"] != null ||
+                head["state"] == "completed"
+            ) {
+                conflict("materialReleaseUnavailable")
+            }
+            val intent =
+                if (worker != null) {
+                    stopWorker(worker, command, session, checkpoint ?: conflict("invalidPayload"))
+                } else {
+                    val value =
+                        complete(
+                            command,
+                            session,
+                            NativeCheckpoint(
+                                "cancelling",
+                                (head["downloadedBytes"] as Number).toLong(),
+                                (head["totalBytes"] as? Number)?.toLong(),
+                            ),
+                        )
+                    // Explicit user cancellation retires old process grants, without claiming real finish.
+                    db
+                        .rawQuery(
+                            "SELECT command_id,session FROM worker_authorizations WHERE engine=? AND generation=? AND finished=0",
+                            arrayOf(command.key.engineId, command.key.generation.toString()),
+                        ).use {
+                            while (it.moveToNext()) {
+                                if (it.getString(1) == session) conflict("transferUnavailable")
+                                db.execSQL(
+                                    "INSERT OR IGNORE INTO retired_workers(command_id,retired_by,reason) VALUES(?,?,?)",
+                                    arrayOf<Any?>(it.getString(0), command.commandId, "explicitCancel"),
+                                )
+                            }
+                        }
+                    db.execSQL(
+                        "UPDATE worker_authorizations SET stop='cancel' WHERE engine=? AND generation=?",
+                        arrayOf<Any?>(command.key.engineId, command.key.generation),
+                    )
+                    value
+                }
+            db.execSQL(
+                "INSERT INTO cancel_cleanups(command_id,task,engine,generation,intent_version,phase) VALUES(?,?,?,?,?,'pending')",
+                arrayOf<Any?>(
+                    command.commandId,
+                    command.key.taskId,
+                    command.key.engineId,
+                    command.key.generation,
+                    intent["receiptVersion"],
+                ),
+            )
+            for ((id, payload, facts) in cleanupMembers(db, command.key)) {
+                db.execSQL(
+                    "INSERT INTO cancel_cleanup_members(command_id,source_id,payload_path,facts_path) VALUES(?,?,?,?)",
+                    arrayOf<Any?>(command.commandId, id, payload, facts),
+                )
+            }
+            intent
+        }
+
+    /** Must only run after actual run/force/close and successful terminal journal save. */
+    fun finishCancel(
+        command: NativeCommand,
+        session: String,
+    ): Map<String, Any?> {
+        val prepared =
+            transaction { db ->
+                if (command.ownerSessionId != session) conflict("staleSession")
+                val encoded = encode(mapOf("method" to command.method, "arguments" to command.payload))
+                db.rawQuery("SELECT payload FROM commands WHERE id=?", arrayOf(command.commandId)).use {
+                    if (!it.moveToFirst() || it.getString(0) != encoded) conflict("commandPayloadChanged")
+                }
+                val current = execution(db, command.key) ?: conflict("staleExecution")
+                db.rawQuery("SELECT MAX(generation) FROM executions WHERE task=?", arrayOf(command.key.taskId)).use {
+                    it.moveToFirst()
+                    if (it.getLong(0) !=
+                        command.key.generation
+                    ) {
+                        conflict("staleExecution")
+                    }
+                }
+                db
+                    .rawQuery(
+                        "SELECT task,engine,generation,intent_version,result FROM cancel_cleanups WHERE command_id=?",
+                        arrayOf(command.commandId),
+                    ).use {
+                        if (!it.moveToFirst() || it.getString(0) != command.key.taskId || it.getString(1) != command.key.engineId ||
+                            it.getLong(2) != command.key.generation ||
+                            it.getLong(3) > current.first
+                        ) {
+                            conflict("materialOwnership")
+                        }
+                        if (!it.isNull(4)) return@transaction decode(it.getString(4)) to emptyList<Triple<String, String, String>>()
+                    }
+                db
+                    .rawQuery(
+                        "SELECT command_id FROM worker_authorizations WHERE engine=? AND generation=? AND finished=0 AND command_id NOT IN (SELECT command_id FROM retired_workers)",
+                        arrayOf(command.key.engineId, command.key.generation.toString()),
+                    ).use {
+                        if (it.moveToFirst()) conflict("transferUnavailable")
+                    }
+                db
+                    .rawQuery(
+                        "SELECT payload FROM receipts WHERE engine=? AND generation=? AND version=?",
+                        arrayOf(command.key.engineId, command.key.generation.toString(), current.first.toString()),
+                    ).use {
+                        if (!it.moveToFirst()) conflict("staleReceipt")
+                        val head = decode(it.getString(0))
+                        val failure = head["error"] as? Map<*, *>
+                        if (head["state"] != "cancelling" ||
+                            (failure != null && failure["code"] != "cleanupFailure")
+                        ) {
+                            throw EngineProtocolException("cleanupFailure", "transferUnavailable")
+                        }
+                    }
+                val members =
+                    db
+                        .rawQuery(
+                            "SELECT source_id,payload_path,facts_path FROM cancel_cleanup_members WHERE command_id=? ORDER BY source_id",
+                            arrayOf(command.commandId),
+                        ).use {
+                            buildList { while (it.moveToNext()) add(Triple(it.getString(0), it.getString(1), it.getString(2))) }
+                        }
+                if (members != cleanupMembers(db, command.key).sortedBy { it.first }) conflict("materialOwnership")
+                null to members
+            }
+        prepared.first?.let { return it }
+        try {
+            OwnedMaterialCleanup(privateRoot).run(prepared.second.map { OwnedMaterialCleanup.Pair(it.second, it.third) }, { path ->
+                transaction { db ->
+                    db.execSQL(
+                        "UPDATE cancel_cleanup_members SET payload_done=CASE WHEN payload_path=? THEN 1 ELSE payload_done END,facts_done=CASE WHEN facts_path=? THEN 1 ELSE facts_done END WHERE command_id=?",
+                        arrayOf<Any?>(path, path, command.commandId),
+                    )
+                }
+            })
+        } catch (error: Exception) {
+            throw EngineProtocolException("cleanupFailure", "materialOwnership").also { it.addSuppressed(error) }
+        }
+        return transaction { db ->
+            db.rawQuery("SELECT result FROM cancel_cleanups WHERE command_id=?", arrayOf(command.commandId)).use {
+                if (!it.moveToFirst()) conflict("materialOwnership")
+                if (!it.isNull(0)) return@transaction decode(it.getString(0))
+            }
+            val current = execution(db, command.key) ?: conflict("staleExecution")
+            db.rawQuery("SELECT payload_done,facts_done FROM cancel_cleanup_members WHERE command_id=?", arrayOf(command.commandId)).use {
+                while (it.moveToNext()) {
+                    if (it.getInt(0) !=
+                        1 ||
+                        it.getInt(1) != 1
+                    ) {
+                        conflict("materialOwnership")
+                    }
+                }
+            }
+            if (current.first == Long.MAX_VALUE) conflict("receiptVersionExhausted")
+            val version = current.first + 1
+            val head =
+                db
+                    .rawQuery(
+                        "SELECT payload FROM receipts WHERE engine=? AND generation=? AND version=?",
+                        arrayOf(command.key.engineId, command.key.generation.toString(), current.first.toString()),
+                    ).use {
+                        if (!it.moveToFirst()) conflict("staleReceipt")
+                        decode(it.getString(0))
+                    }
+            val receipt =
+                NativeCheckpoint(
+                    "cancelling",
+                    (head["downloadedBytes"] as Number).toLong(),
+                    (head["totalBytes"] as? Number)?.toLong(),
+                ).receipt(command.key, version)
+            db.execSQL(
+                "INSERT INTO receipts(engine,generation,version,payload) VALUES(?,?,?,?)",
+                arrayOf<Any?>(command.key.engineId, command.key.generation, version, encode(receipt)),
+            )
+            db.execSQL(
+                "UPDATE executions SET version=? WHERE engine=? AND generation=?",
+                arrayOf<Any?>(version, command.key.engineId, command.key.generation),
+            )
+            db.execSQL(
+                "UPDATE cancel_cleanups SET phase='complete',result=? WHERE command_id=? AND result IS NULL",
+                arrayOf<Any?>(encode(receipt), command.commandId),
+            )
+            receipt
+        }
+    }
+
     fun acknowledge(ack: NativeAck) =
         transaction { db ->
             val current = execution(db, ack.key) ?: conflict("staleExecution")
             if (ack.receiptVersion > current.first) conflict("staleReceipt")
-            // No material deletion path exists in this checkpoint. Refuse explicit release,
-            // including old-generation release, without advancing its acknowledgement.
+            // Ack has no verifiable publication/restart intent in this native schema.
+            // Explicit cancel cleanup is separate; ordinary and old acknowledgements never delete.
             if (ack.releaseResumeRefs.isNotEmpty()) conflict("materialReleaseUnavailable")
             db.execSQL(
                 "UPDATE executions SET ack=MAX(ack,?) WHERE engine=? AND generation=?",

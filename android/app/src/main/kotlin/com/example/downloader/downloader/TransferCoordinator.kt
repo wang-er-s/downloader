@@ -16,6 +16,14 @@ internal class TransferCoordinator(
     val lifecycle: ServiceLifecycle = ServiceLifecycle(),
 ) {
     interface Journal {
+        fun beginCancel(
+            command: NativeCommand,
+            worker: NativeCommand?,
+            checkpoint: NativeCheckpoint?,
+        ): Map<String, Any?> = conflict("materialReleaseUnavailable")
+
+        fun finishCancel(command: NativeCommand): Map<String, Any?> = conflict("materialReleaseUnavailable")
+
         fun register(command: NativeCommand): Map<String, Any?>?
 
         fun accept(command: NativeCommand): Map<String, Any?>
@@ -59,6 +67,7 @@ internal class TransferCoordinator(
         var failureReason: String? = null
         var pause: NativeCommand? = null
         var cancel: NativeCommand? = null
+        val cancelResults = mutableListOf<CompletableFuture<Map<String, Any?>>>()
         var pauseResult: CompletableFuture<Map<String, Any?>>? = null
         lateinit var token: String
         var terminal: NativeCheckpoint? = null
@@ -90,31 +99,22 @@ internal class TransferCoordinator(
                     conflict("staleExecution")
                 }
                 val retained = work[command.key]
+                if (command.method == "cancel") {
+                    cancel(command, retained, result)
+                    return@execute
+                }
                 if (retained?.saveFailure == true) {
                     val original =
                         when (command.method) {
                             "enqueue", "resume" -> retained.command
-                            "cancel" -> retained.cancel
                             else -> retained.pause
                         }
 
-                    fun same(
-                        a: Any?,
-                        b: Any?,
-                    ): Boolean =
-                        when {
-                            a is Map<*, *> && b is Map<*, *> -> a.keys == b.keys && a.keys.all { same(a[it], b[it]) }
-                            a is List<*> && b is List<*> -> a.size == b.size && a.indices.all { same(a[it], b[it]) }
-                            (a is Int || a is Long) && (b is Int || b is Long) -> (a as Number).toLong() == (b as Number).toLong()
-                            else -> a == b
-                        }
                     if (original == null || original.method != command.method ||
                         !same(original.payload, command.payload)
                     ) {
                         conflict("commandOutcomeUnknown")
                     }
-                    // The cancel intent already committed its immutable cleanupFailure result.
-                    if (command.method == "cancel") throw EngineProtocolException("cleanupFailure", "materialReleaseUnavailable")
                     if (command.method == "pause") retained.pauseResult = result
                     val receipt = saveTerminal(retained)
                     if (command.method == "pause") completePause(result, receipt) else result.complete(receipt)
@@ -140,7 +140,6 @@ internal class TransferCoordinator(
                         journal.register(command)
                     }
                 if (replay != null) {
-                    if (command.method == "cancel") throw EngineProtocolException("cleanupFailure", "materialReleaseUnavailable")
                     if (command.method == "pause" && replay["state"] != "paused") {
                         val failure = replay["error"] as? Map<*, *>
                         throw EngineProtocolException(failure?.get("code") as? String ?: "stateConflict", "transferUnavailable")
@@ -162,20 +161,13 @@ internal class TransferCoordinator(
                     }
                 } else {
                     val item = work[command.key] ?: conflict("transferUnavailable")
-                    if (item.intent == "cancel" || (item.pause != null && command.method != "cancel")) conflict("commandResultUnknown")
-                    val cancelling = command.method == "cancel"
-                    val receipt = journal.stop(item.command, command, checkpoint(item, if (cancelling) "cancelling" else "running"))
-                    item.intent = command.method
-                    if (cancelling) {
-                        item.cancel = command
-                        emit(receipt)
-                        result.completeExceptionally(EngineProtocolException("cleanupFailure", "materialReleaseUnavailable"))
-                    } else {
-                        item.pause = command
-                        item.pauseResult = result
-                    }
+                    if (item.intent == "cancel" || item.pause != null) conflict("commandResultUnknown")
+                    journal.stop(item.command, command, checkpoint(item, "running"))
+                    item.intent = "pause"
+                    item.pause = command
+                    item.pauseResult = result
                     lifecycle.revoke(item.token)
-                    item.stop.request(if (cancelling) HttpTransfer.Stop.Reason.CANCEL else HttpTransfer.Stop.Reason.PAUSE)
+                    item.stop.request(HttpTransfer.Stop.Reason.PAUSE)
                     if (!item.active) finish(item, null, null)
                 }
             } catch (error: Exception) {
@@ -183,6 +175,50 @@ internal class TransferCoordinator(
             }
         }
         return result
+    }
+
+    private fun same(a: Any?, b: Any?): Boolean = when {
+        a is Map<*, *> && b is Map<*, *> -> a.keys == b.keys && a.keys.all { same(a[it], b[it]) }
+        a is List<*> && b is List<*> -> a.size == b.size && a.indices.all { same(a[it], b[it]) }
+        (a is Int || a is Long) && (b is Int || b is Long) -> (a as Number).toLong() == (b as Number).toLong()
+        else -> a == b
+    }
+
+    private fun cancel(
+        command: NativeCommand,
+        item: Work?,
+        result: CompletableFuture<Map<String, Any?>>,
+    ) {
+        if (item?.cancel != null) {
+            if (!same(item.cancel!!.payload, command.payload)) conflict("commandPayloadChanged")
+            // Revalidate the complete durable command even while waiting for the real exit.
+            journal.beginCancel(command, item.command, checkpoint(item, "cancelling"))
+            item.cancelResults.add(result)
+            if (item.saveFailure) {
+                saveTerminal(item)
+                val cleaned = journal.finishCancel(command)
+                emit(cleaned)
+                item.cancelResults.forEach { it.complete(cleaned) }
+            }
+            return
+        }
+        // Only the original enqueue/resume/pause may repair an unrelated pending terminal.
+        if (item?.saveFailure == true) throw EngineProtocolException("persistenceFailure", "terminalSavePending")
+        val live = work[command.key]
+        val receipt = journal.beginCancel(command, live?.command, live?.let { checkpoint(it, "cancelling") })
+        emit(receipt)
+        if (live == null) {
+            val cleaned = journal.finishCancel(command)
+            emit(cleaned)
+            result.complete(cleaned)
+            return
+        }
+        live.intent = "cancel"
+        live.cancel = command
+        live.cancelResults.add(result)
+        lifecycle.revoke(live.token)
+        live.stop.request(HttpTransfer.Stop.Reason.CANCEL)
+        if (!live.active) finish(live, null, null)
     }
 
     /** Production passes the actual foreground Service instance identity. */
@@ -309,7 +345,7 @@ internal class TransferCoordinator(
             }
         val code =
             when {
-                item.intent == "cancel" -> "cleanupFailure"
+                item.intent == "cancel" -> if (realError != null) failureCode(realError) else item.failureCode ?: "cleanupFailure"
                 item.failureCode != null -> item.failureCode
                 realError != null -> failureCode(realError)
                 else -> null
@@ -332,6 +368,17 @@ internal class TransferCoordinator(
             diagnostic(failure)
             item.pauseResult?.completeExceptionally(error)
             item.accepted.completeExceptionally(error)
+            item.cancelResults.forEach { it.completeExceptionally(error) }
+        }
+        if (item.cancel != null && !item.saveFailure) {
+            try {
+                if (realError != null || item.failureCode != null) throw EngineProtocolException("cleanupFailure", "transferUnavailable")
+                val cleaned = journal.finishCancel(item.cancel!!)
+                emit(cleaned)
+                item.cancelResults.forEach { it.complete(cleaned) }
+            } catch (failure: Exception) {
+                item.cancelResults.forEach { it.completeExceptionally(failure) }
+            }
         }
         drain()
         if (work.values.none { it.terminal == null }) idle()

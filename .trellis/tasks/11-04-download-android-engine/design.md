@@ -115,3 +115,13 @@ acceptResume在同一事务核对真实Runtime session、完整命令/head/最�
 公开 resume 生产源码局部 PASS；provider 502/EOF 中断后的恢复检查完成正式报告，不把中断当作通过或源码失败。审查修复持久 PAUSE/CANCEL 与迟到 staged 竞争：staged 事务重验持久 stop 并转 Stopped；持久 CANCEL 不认证新 proof。历史 finished worker 重放使用原 receipt 的派生恢复字段，仍精确比较完整非派生 checkpoint/worker/pause result，避免新 active branch 污染旧终态幂等。
 
 Coordinator 真实 socket/file/core 回归已覆盖公开 pause→resume→再 pause/resume、prefix/copy 各 PAUSE/CANCEL、关闭/认证提交失败及持久 cancel 竞争。独立80项 JVM（5+20+25+7+23）、静态分析与 debug APK 通过；Dart 未改沿用前轮独立102项，18项 SQLite instrumentation 仅编译。完整任务保持 BLOCK/in_progress、PRD 不勾选；设备 SQLite/Service/权限/强杀重开与 API 矩阵、受控清理/发布、fsync及真实大文件仍待验证。下一步先闭合持久取消意图、所有归属材料的可重放受控释放与停止后清理，再进入 file-storage；不删除未知孤儿，不凭路径或普通 ack 授予删除。
+
+## v7 显式取消与受控清理（本轮最小生产闭环）
+
+取消独立于恢复 worker：Coordinator 在 Runtime 同一串行队列先调用 beginCancel，原子登记完整命令、cancelling 接受事实、全部原件/候选 UUID 双文件归属快照和 pending 清理操作，再请求 CANCEL。活动 Work 必须真实退出并完成终态日志保存后才调用清理；无 Work 的旧进程/paused/failed 只退休旧授权并执行本地清理，绝不创建网络 worker。清理期间串行排他，当前执行 cancelling 拒绝 resume。重开只读，只有相同完整 cancel 的显式重放恢复 pending 清理。
+
+v7 新增 cancel_cleanups 与 cancel_cleanup_members，保留 v1–v6 所有行，DDL/版本沿用 SQLiteOpenHelper 原子迁移。commands.result 保留原不可变接受回执；cancel_cleanups.result 是首次实际停止、清理及终态提交成功后保存的不可变完成回执（仍用公共 cancelling 状态，error=null，绝不制造 completed）。瞬时清理失败不写完成结果，保留 pending/成员清单，显式重放可继续；历史 v6 已对外返回 cleanupFailure 的命令仍保留原失败语义，需新当前 session/版本 cancel 创建 v7 操作，不能改历史结果。
+
+删除前整集合验证原生 canonical 私有根/父目录、UUID .part/.facts 配对、NOFOLLOW 普通文件及完整执行/来源归属；任一失败零删除。每成员删除后持久 done，已登记 missing 幂等，IO/持久失败保留未完意图，不宣称文件集合原子。清理完成后仍保留材料/证明历史行供诊断；持久 stop/retired 阻止迟到 callback 重新认证。
+
+非空 ack 分支继续保守拒绝：当前接口没有可由原生日志验证的发布完成证明，且没有独立的确认重下业务意图字段；不能把普通 paused/failed 或任意旧 ack 当清新材料授权。原生显式 cancel 意图提供本轮唯一释放入口；Dart 真实 AppStore 提交核对保持，原生不访问业务库。真实设备/完整 PRD 仍 BLOCK。

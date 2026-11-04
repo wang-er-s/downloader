@@ -31,9 +31,35 @@ class TransferCoordinatorTest {
         var allocationGate: CountDownLatch? = null
         val allocationEntered = CountDownLatch(1)
 
+        var cleanupEnabled = false
+        var failCleanup = false
+        var failIntent = false
+        val owned = mutableMapOf<ExecutionKey, MutableList<OwnedMaterialCleanup.Pair>>()
+        val cleanups = mutableMapOf<String, List<OwnedMaterialCleanup.Pair>>()
+        val cleanupResults = mutableMapOf<String, Map<String, Any?>>()
+        override fun beginCancel(command: NativeCommand, worker: NativeCommand?, checkpoint: NativeCheckpoint?): Map<String, Any?> {
+            if (failIntent) throw java.io.IOException("intent commit failed")
+            register(command)?.let { return it }
+            val intent = if (worker != null) stop(worker, command, checkpoint!!) else receipt(command, NativeCheckpoint("cancelling", 0)).also { results[command.commandId] = it }
+            cleanups[command.commandId] = owned[command.key]?.toList() ?: emptyList()
+            return intent
+        }
+        override fun finishCancel(command: NativeCommand): Map<String, Any?> {
+            cleanupResults[command.commandId]?.let { return it }
+            if (!cleanupEnabled || failCleanup) throw EngineProtocolException("cleanupFailure", "materialReleaseUnavailable")
+            OwnedMaterialCleanup(root).run(cleanups[command.commandId]!!, {})
+            return receipt(command, NativeCheckpoint("cancelling", 0)).also { cleanupResults[command.commandId] = it }
+        }
+
         override fun register(command: NativeCommand): Map<String, Any?>? {
             if (results.containsKey(command.commandId)) {
-                if (payloads[command.commandId] != command.payload) conflict("commandPayloadChanged")
+                fun normalized(value: Any?): Any? = when (value) {
+                    is Int -> value.toLong()
+                    is Map<*, *> -> value.mapValues { normalized(it.value) }
+                    is List<*> -> value.map { normalized(it) }
+                    else -> value
+                }
+                if (normalized(payloads[command.commandId]) != normalized(command.payload)) conflict("commandPayloadChanged")
                 return results[command.commandId] ?: conflict("commandOutcomeUnknown")
             }
             if ((versions[command.key] ?: 0L) != command.expectedReceiptVersion) conflict("staleReceipt")
@@ -70,7 +96,8 @@ class TransferCoordinatorTest {
         override fun transfer(command: NativeCommand) =
             HttpTransfer(root, EngineProtocol.string(EngineProtocol.map(command.payload["input"]), "url"), onCheckpoint = { forced ->
                 proofs[command.key] = NativeResumeMaterial("initial", command.commandId, versions[command.key]!!, forced)
-            }) { _, _, _ ->
+            }) { key, payload, facts ->
+                owned.getOrPut(key) { mutableListOf() }.add(OwnedMaterialCleanup.Pair(payload.path, facts.path))
                 allocationEntered.countDown()
                 allocationGate?.await(5, TimeUnit.SECONDS)
                 if (allocationFailure) throw IllegalStateException("allocation failure")
@@ -112,6 +139,135 @@ class TransferCoordinatorTest {
                     throw java.io.IOException("commit returned uncertain")
                 }
             }
+        }
+    }
+
+    @Test fun activeCancelWaitsForRealExitThenCleansAndReplaysWithoutGet() {
+        ServerSocket(0).use { server ->
+            val release = CountDownLatch(1); val requests = AtomicInteger()
+            val responder = Thread { server.accept().use { socket ->
+                requests.incrementAndGet()
+                socket.getInputStream().bufferedReader().let { while (!it.readLine().isNullOrEmpty()) { } }
+                socket.getOutputStream().write("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".toByteArray() + ByteArray(8192) { 7 })
+                socket.getOutputStream().flush(); release.await(5, TimeUnit.SECONDS)
+            } }.apply { isDaemon = true; start() }
+            Fixture().use { f ->
+                f.log.cleanupEnabled = true
+                val c = command("active-clean", "http://127.0.0.1:${server.localPort}/")
+                f.progress[8192L] = CountDownLatch(1)
+                f.start(c).get(5, TimeUnit.SECONDS)
+                assertTrue(f.progress[8192L]!!.await(5, TimeUnit.SECONDS))
+                val cancel = command("cancel-clean", "", "cancel", f.onQueue { f.log.versions[c.key]!! }, c.key)
+                val result = f.coordinator.command(cancel); f.onQueue { }
+                assertFalse(result.isDone)
+                val pair = f.onQueue { f.log.owned[c.key]!!.single() }
+                assertTrue(File(pair.payload).exists()); assertTrue(File(pair.facts).exists())
+                val duplicate = f.coordinator.command(cancel); f.onQueue { }; assertFalse(duplicate.isDone)
+                release.countDown()
+                val receipt = result.get(5, TimeUnit.SECONDS)
+                assertNull(receipt["error"]); assertEquals(receipt, duplicate.get(5, TimeUnit.SECONDS))
+                assertFalse(File(pair.payload).exists()); assertFalse(File(pair.facts).exists())
+                assertEquals(receipt, f.coordinator.command(cancel).get(5, TimeUnit.SECONDS))
+                assertEquals(1, requests.get()); assertEquals(1, f.tokens.size)
+            }
+            responder.join(5000)
+        }
+    }
+
+    @Test fun cancelTerminalSaveRetryValidatesIdentityAndNeverStartsAnotherGet() {
+        ServerSocket(0).use { server ->
+            val release = CountDownLatch(1)
+            val requests = AtomicInteger()
+            val responder = Thread { server.accept().use { socket ->
+                requests.incrementAndGet()
+                socket.getInputStream().bufferedReader().let { while (!it.readLine().isNullOrEmpty()) { } }
+                socket.getOutputStream().write("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".toByteArray() + ByteArray(8192) { 7 })
+                socket.getOutputStream().flush()
+                release.await(5, TimeUnit.SECONDS)
+            } }.apply { isDaemon = true; start() }
+            Fixture().use { f ->
+                f.log.cleanupEnabled = true
+                f.log.failTerminal = true
+                val c = command("cancel-save-worker", "http://127.0.0.1:${server.localPort}/")
+                val sampled = CountDownLatch(1)
+                f.positiveSample = sampled
+                f.start(c).get(5, TimeUnit.SECONDS)
+                assertTrue(sampled.await(5, TimeUnit.SECONDS))
+                val cancel = command("cancel-save", "", "cancel", f.onQueue { f.log.versions[c.key]!! }, c.key)
+                val result = f.coordinator.command(cancel)
+                f.onQueue { }
+                release.countDown()
+                rejected(result)
+                val pair = f.onQueue { f.log.owned[c.key]!!.single() }
+                assertTrue(File(pair.payload).exists()); assertTrue(File(pair.facts).exists())
+                assertEquals(1, f.onQueue { f.coordinator.pendingSaveCount() })
+                val attempts = f.onQueue { f.log.finishAttempts }
+                for (changed in listOf(cancel.payload + ("expectedReceiptVersion" to 99L),
+                    cancel.payload + ("ownerSessionId" to "old"))) {
+                    rejected(f.coordinator.command(EngineProtocol.command("cancel", changed)))
+                }
+                assertEquals(attempts, f.onQueue { f.log.finishAttempts })
+                f.onQueue { f.log.failTerminal = false }
+                val codecReplay = EngineProtocol.command("cancel", cancel.payload +
+                    ("expectedReceiptVersion" to cancel.expectedReceiptVersion.toInt()) + ("generation" to cancel.key.generation.toInt()))
+                val retry = f.coordinator.command(codecReplay)
+                val duplicate = f.coordinator.command(cancel)
+                val done = retry.get(5, TimeUnit.SECONDS)
+                assertEquals(done, duplicate.get(5, TimeUnit.SECONDS)); assertNull(done["error"])
+                assertFalse(File(pair.payload).exists()); assertFalse(File(pair.facts).exists())
+                assertEquals(0, f.onQueue { f.coordinator.pendingSaveCount() })
+                assertEquals(done, f.coordinator.command(cancel).get(5, TimeUnit.SECONDS))
+                assertEquals(1, requests.get()); assertEquals(1, f.tokens.size)
+                assertEquals(attempts + 1, f.onQueue { f.log.finishAttempts })
+            }
+            responder.join(5000)
+        }
+    }
+
+    @Test fun queuedCancelIntentFailureAndLocalCleanupFailureRemainExplicitlyRetryable() {
+        Fixture().use { f ->
+            f.log.cleanupEnabled = true
+            val c = command("queued-clean", "http://127.0.0.1:1/")
+            val accepted = f.coordinator.command(c); f.onQueue { }
+            val cancel = command("queued-cancel", "", "cancel", f.onQueue { f.log.versions[c.key]!! }, c.key)
+            f.onQueue { f.log.failIntent = true }
+            rejected(f.coordinator.command(cancel))
+            assertTrue(f.onQueue { f.log.cleanups.isEmpty() }); assertFalse(accepted.isDone)
+            f.onQueue { f.log.failIntent = false; f.log.failCleanup = true }
+            rejected(f.coordinator.command(cancel))
+            assertTrue(accepted.isDone); assertEquals(1, f.tokens.size)
+            f.onQueue { f.log.failCleanup = false }
+            val receipt = f.coordinator.command(cancel).get(5, TimeUnit.SECONDS)
+            assertNull(receipt["error"]); assertEquals(1, f.tokens.size)
+            assertFalse(f.onQueue { f.coordinator.serviceReady(f.tokens.single()) })
+            val changed = EngineProtocol.command("cancel", cancel.payload + ("expectedReceiptVersion" to 99L))
+            rejected(f.coordinator.command(changed))
+            f.log.results["unknown-cancel"] = null
+            rejected(f.coordinator.command(command("unknown-cancel", "", "cancel", 0, c.key)))
+        }
+    }
+
+    @Test fun stoppedOldRuntimeCancelOnlyCleansRegisteredFilesWithoutLaunch() {
+        Fixture().use { f ->
+            f.log.cleanupEnabled = true
+            val key = ExecutionKey("old-clean", "old-clean", 0)
+            val directory = File(f.root, "http_staging_v1").apply { mkdirs() }
+            val id = java.util.UUID.randomUUID().toString()
+            val part = File(directory, "$id.part").apply { writeText("tail") }
+            val facts = File(directory, "$id.facts").apply { writeText("facts") }
+            f.log.owned[key] = mutableListOf(OwnedMaterialCleanup.Pair(part.path, facts.path))
+            f.log.receipt(command("old-worker", "http://127.0.0.1:1/", key = key), NativeCheckpoint("paused", 4))
+            val orphan = File(directory, "unregistered.part").apply { writeText("sentinel") }
+            var launches = 0
+            val next = TransferCoordinator("new-session", f.queue, f.log, { launches++ }, {}, {})
+            val cmd = command("old-cancel", "", "cancel", 1, key)
+            rejected(next.command(cmd)) // old session cannot authorize deletion
+            assertTrue(part.exists())
+            val current = EngineProtocol.command("cancel", cmd.payload + ("ownerSessionId" to "new-session"))
+            val receipt = next.command(current).get(5, TimeUnit.SECONDS)
+            assertNull(receipt["error"]); assertFalse(part.exists()); assertFalse(facts.exists())
+            assertEquals("sentinel", orphan.readText()); assertEquals(0, launches)
+            assertEquals(receipt, next.command(current).get(5, TimeUnit.SECONDS))
         }
     }
 
@@ -172,12 +328,15 @@ class TransferCoordinatorTest {
         val idle = CountDownLatch(1)
         var throwEvents = false
         val progress = java.util.concurrent.ConcurrentHashMap<Long, CountDownLatch>()
+        var positiveSample: CountDownLatch? = null
         val coordinator =
             TransferCoordinator("s", queue, log, { tokens.add(it) }, { idle.countDown() }, {
                 assertTrue("events follow durable receipts", log.receipts.contains(it["receipt"]))
                 if (throwEvents) throw IllegalStateException("consumer unavailable")
                 events.add(it)
-                progress[(it["downloadedBytes"] as Number).toLong()]?.countDown()
+                val bytes = (it["downloadedBytes"] as Number).toLong()
+                progress[bytes]?.countDown()
+                if (bytes > 0) positiveSample?.countDown()
                 val receipt = it["receipt"] as Map<*, *>
                 if (receipt["state"] == "publishing") {
                     published.entries.firstOrNull { entry -> entry.key.json() == receipt["key"] }?.value?.countDown()
@@ -289,9 +448,11 @@ class TransferCoordinatorTest {
             f.onQueue { }
             assertFalse("pause cannot resolve while worker is inside run", pause.isDone)
             val cancel = f.coordinator.command(command("x", "", "cancel", version, c.key))
-            rejected(cancel)
+            f.onQueue { }
+            assertFalse(cancel.isDone)
             assertEquals("cancelling", f.onQueue { f.log.receipts.last()["state"] })
             gate.countDown()
+            rejected(cancel)
             assertTrue(f.idle.await(5, TimeUnit.SECONDS))
             rejected(pause)
             assertEquals("cancelling", f.onQueue { f.log.receipts.last()["state"] })
@@ -402,32 +563,23 @@ class TransferCoordinatorTest {
         }
     }
 
-    @Test fun cancelReplayKeepsCommittedCleanupFailureWhileTerminalSaveIsPending() {
+    @Test fun cancelTerminalSaveRetryOnlyFinishesLocallyAndPreservesAcceptedResult() {
         Fixture().use { f ->
+            f.log.cleanupEnabled = true
             val c = command("a", "http://127.0.0.1:1/")
-            val accepted = f.coordinator.command(c)
+            f.coordinator.command(c)
             f.onQueue { f.log.failTerminal = true }
             val cancel = command("cancel", "", "cancel", f.onQueue { f.log.versions[c.key]!! }, c.key)
-            fun assertCancelFailure() {
-                try { f.coordinator.command(cancel).get(5, TimeUnit.SECONDS); fail("must reject cleanup") }
-                catch (error: java.util.concurrent.ExecutionException) {
-                    assertEquals("cleanupFailure", (error.cause as EngineProtocolException).code)
-                }
-            }
-            assertCancelFailure()
-            f.onQueue { }
+            rejected(f.coordinator.command(cancel))
             assertEquals(1, f.onQueue { f.coordinator.pendingSaveCount() })
-            val attempts = f.onQueue { f.log.finishAttempts }
             val committed = f.onQueue { f.log.results[cancel.commandId] }
-            assertCancelFailure()
-            assertEquals(attempts, f.onQueue { f.log.finishAttempts })
-            assertEquals(committed, f.onQueue { f.log.results[cancel.commandId] })
+            rejected(f.coordinator.command(cancel))
             f.onQueue { f.log.failTerminal = false }
-            assertEquals("cancelling", f.coordinator.command(c).get(5, TimeUnit.SECONDS)["state"])
-            assertCancelFailure()
+            val completed = f.coordinator.command(cancel).get(5, TimeUnit.SECONDS)
+            assertNull(completed["error"])
+            assertEquals(completed, f.coordinator.command(cancel).get(5, TimeUnit.SECONDS))
+            assertEquals(committed, f.onQueue { f.log.results[cancel.commandId] })
             assertEquals(1, f.tokens.size)
-            assertTrue(f.root.list()!!.isEmpty())
-            assertTrue(accepted.isDone)
         }
     }
 
@@ -563,6 +715,8 @@ class TransferCoordinatorTest {
 
     @Test fun publicCopyPauseCannotHideCloseFailure() = publicRecoveryStop(true, "pause", true)
 
+    @Test fun publicCopyCancelCannotHideCloseFailureOrStartCleanup() = publicRecoveryStop(true, "cancel", true)
+
     @Test fun publicPauseProofFailureAndPersistedCancelNeverPromoteCandidate() {
         for (method in listOf("pause", "cancel")) ServerSocket(0).use { server ->
             val requests = AtomicInteger()
@@ -592,7 +746,7 @@ class TransferCoordinatorTest {
                 assertTrue(f.idle.await(5, TimeUnit.SECONDS))
                 val terminal = f.onQueue { f.log.receipts.last() }
                 assertEquals(if (method == "cancel") "cancelling" else "failed", terminal["state"])
-                assertEquals(if (method == "cancel") "cleanupFailure" else "persistenceFailure", (terminal["error"] as Map<*, *>) ["code"])
+                assertEquals(if (method == "cancel") "stateConflict" else "persistenceFailure", (terminal["error"] as Map<*, *>) ["code"])
                 assertEquals(source, f.log.proofs[key]); assertArrayEquals(original, source.forced.source.readBytes())
                 assertEquals(1, requests.get()); assertEquals(1, f.log.candidates.size)
                 if (method == "cancel") try { f.coordinator.command(stopCommand).get(5, TimeUnit.SECONDS); fail() }
@@ -612,6 +766,7 @@ class TransferCoordinatorTest {
                 socket.getOutputStream().write("HTTP/1.1 206 Partial Content\r\nETag: \"strong\"\r\nContent-Range: bytes 8192-16383/16384\r\nContent-Length: 8192\r\nConnection: close\r\n\r\n".toByteArray() + ByteArray(8192) { 8 })
             } }.apply { isDaemon = true; start() } else null
             Fixture().use { f ->
+                f.log.cleanupEnabled = failClose
                 val key = ExecutionKey("combination", "combination", 0)
                 val source = seedProof(f, key, "http://127.0.0.1:${server.localPort}/")
                 val original = source.forced.source.readBytes()
@@ -635,7 +790,11 @@ class TransferCoordinatorTest {
                 assertTrue(f.idle.await(5, TimeUnit.SECONDS))
                 val terminal = f.onQueue { f.log.receipts.last() }
                 assertEquals(if (method == "cancel") "cancelling" else if (failClose) "failed" else "paused", terminal["state"])
-                if (failClose) assertEquals("fileWriteFailure", (terminal["error"] as Map<*, *>) ["code"])
+                if (failClose) {
+                    assertEquals("fileWriteFailure", (terminal["error"] as Map<*, *>) ["code"])
+                    assertTrue(f.onQueue { f.log.cleanupResults.isEmpty() })
+                    assertTrue(f.log.candidates.all { it.exists() })
+                }
                 assertEquals(source, f.log.proofs[key]); assertArrayEquals(original, source.forced.source.readBytes())
                 assertEquals(if (copying) 1 else 0, requests.get()); assertEquals(if (copying) 1 else 0, f.log.candidates.size)
                 f.coordinator.command(resume).get(5, TimeUnit.SECONDS)
