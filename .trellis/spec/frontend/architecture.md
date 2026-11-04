@@ -165,14 +165,14 @@ Future<void> pause(String taskId) async {
 
 ### 1. Scope / Trigger
 
-适用于 AndroidEngine、AndroidEngineChannels、ExecutionJournal、ServiceLifecycle、TransferCoordinator、DownloadService、HttpTransfer、NativeResumeMaterial 和 ResumeTransfer 的命令、持久执行及停止边界。2026-11-04 恢复材料与内部实际 GET 安全门独立源码局部 PASS：58项 JVM、flutter analyze 和 debug APK 构建通过；Dart 未改，沿用前轮独立102项，不声称本轮重跑。14项 Android SQLite instrumentation 仅编译；公开 resume 调度、真实 Service/SQLite/通道及 API29/30/33/35/36 设备矩阵仍 BLOCK，完整任务不得勾选或归档。
+适用于 AndroidEngine、AndroidEngineChannels、ExecutionJournal、ServiceLifecycle、TransferCoordinator、DownloadService、HttpTransfer、NativeResumeMaterial 和 ResumeTransfer 的命令、持久执行及停止边界。2026-11-04 v5 candidate 停止与持久 proof 前置独立源码局部 PASS：70项 JVM、flutter analyze 和 debug APK 构建通过；Dart 未改，沿用前轮独立102项，不声称本轮重跑。15项 Android SQLite instrumentation 仅编译；公开 resume 调度、真实 Service/SQLite/通道及 API29/30/33/35/36 设备矩阵仍 BLOCK，完整任务不得勾选或归档。
 
 ### 2. Signatures
 
 - 通道固定为 `downloader/android_engine`、`downloader/android_engine/events`，请求均含 `protocolVersion=1`。`inspect` 只携带版本，返回 `{protocolVersion,ownerSessionId,sequence,receipts}`，空集合也返回当前会话。事件有当前会话、单调 sequence 和完整回执。
 - enqueue/pause/resume/cancel 携带扁平 taskId/engineId/generation、commandId、ownerSessionId、expectedReceiptVersion；enqueue 另传 `input=EngineTask.toJson()`，嵌套 key 必须匹配。ack 为扁平执行键、receiptVersion、releaseResumeRefs。不会把内部嵌套命令 JSON 原样当通道命令。
-- 日志入口：`register(command,session)`、`acceptWorker(command,session)`、`newTransfer(command,session,allocation)`、`registerMaterials(command,session,payload,facts)`、`saveResumeCheckpoint(command,session,forced)`、`inspectResume(key)`、`newRecovery(command,session,ref): ResumeTransfer`、`inspectRecoveries(key)`、`inspectMaterials(key)`、`workerReceipt(command,session,checkpoint,finished)`、`stopWorker(worker,command,session,checkpoint)`、`finishWorker(command,session,checkpoint,pause)`、`inspect()`、`acknowledge(ack)`；既有 `complete` 保留旧命令路径。newRecovery 是内部工厂，公开 resume 尚未调用。
-- 独立 `android_execution_v1.db` 的 user_version=4；表为 executions、commands、receipts、materials、worker_authorizations、resume_checkpoints、recovery_attempts、recovery_operations，不打开共享 AppStore。
+- 日志入口：`register(command,session)`、`acceptWorker(command,session)`、`newTransfer(command,session,allocation)`、`registerMaterials(command,session,payload,facts)`、`saveResumeCheckpoint(command,session,forced)`、`inspectResume(key)`、`newRecovery(command,session,ref): ResumeTransfer`、`inspectCandidate(key,resumeCommandId)`、`inspectRecoveries(key)`、`inspectMaterials(key)`、`workerReceipt(command,session,checkpoint,finished)`、`stopWorker(worker,command,session,checkpoint)`、`finishWorker(command,session,checkpoint,pause)`、`inspect()`、`acknowledge(ack)`；既有 `complete` 保留旧命令路径。newRecovery 是内部工厂，公开 resume 尚未调用。
+- 独立 `android_execution_v1.db` 的 user_version=5；表为 executions、commands、receipts、materials、worker_authorizations、resume_checkpoints、recovery_attempts、recovery_operations、recovery_candidate_files、candidate_checkpoints，不打开共享 AppStore。
 - ServiceLifecycle：`issue(stop)`、`pending(token,action)`、`foreground(token,instance,action)`、`ready(token,instance)`、`worker(token,action)`、`revoke(token)`、`idle()`、`stop(ticket,action)`、`destroy(instance,action)`；token 和实例归属只在当前进程有效，不从数据库重建调度。
 - `HttpTransfer(appFiles: File, authorizedUrl: String? = null, onCheckpoint: (ForcedMaterial) -> Unit = {}, onAllocation: (ExecutionKey,File,File) -> Unit).run(key,url,stop,onSample): Staged`；Sample 为 bytes:Long、total:Long?、monotonicMs:Long，Staged 为 file、bytes、total、effectiveUrl、stop、sha256。`Stop.request(PAUSE|CANCEL)` 只发布停止请求。生产 newTransfer 注入检查点持久回调；`ResumeTransfer.run(stop,onSample,onCopied): Staged` 只由内部固定材料工厂构建，测试故障注入不改变默认真实关闭/断连。
 
@@ -182,7 +182,7 @@ Future<void> pause(String taskId) async {
 
 - 进程随机会话、单协调队列不依赖 Activity；detach 只解绑监听。命令深复制并重新解析，固定完整执行键、commandId、会话、期望版本及 URL。原生只接受 Int/Long 计数，拒绝负数、未知版本、控制字符、非法名称和嵌套身份不匹配。
 - register 原子登记执行及 NULL 未知命令结果；acceptWorker 同事务保存 queued 接受结果及 worker_authorizations。不可变 enqueue 结果与后续递增 worker 事实分离；同 commandId/规范化载荷重放，不同载荷拒绝。未知 NULL 结果不是重跑 HTTP 的许可。
-- v1→v4 保留旧三表/历史并依次新增 materials、worker_authorizations 与恢复三表；v2→v4 新增后两组，v3→v4 仅新增恢复三表。SQLiteOpenHelper 同事务迁移 DDL 与 user_version，不支持的版本拒绝，失败保留数据库，不删库重建。回滚失败不覆盖首异常。
+- v1→v5 保留旧三表/历史并依次新增 materials、worker_authorizations、恢复三表及候选两表；v2/v3/v4 仅补后续表。SQLiteOpenHelper 同事务迁移 DDL 与 user_version，不支持的版本拒绝，失败保留数据库，不删库重建。v4→v5 第二 DDL 失败须回滚第一 DDL 和版本，保留旧回执；当前该断言仅编译，未在设备执行。回滚失败不覆盖首异常。
 - materials 以 command_id 为主键，保存完整执行归属和唯一 payload/facts 私有路径；外键引用命令和执行。worker_authorizations 以 enqueue command_id 为主键，保存 session、engine、generation、version、allocated、stop、finished；完整命令和 task 归属仍在事务内核验，不能仅信任外键。
 - newTransfer 捕获完整命令/授权 URL；run 在建目录前拒绝 URL 替换。分配事务重查命令载荷、当前会话/执行/代次、授权版本、未停止/未完成及未消费条件，再消费一次性分配权并登记材料；旧 pending 路径仍要求 result=NULL，旧库命令不自动升级为 worker 权限。一个命令不能二次分配，即使原文件不存在也不能重下。
 - 原生 Context.filesDir 是唯一私有根，不使用 Dart staging 路径授权；拒绝根别名和 symlink 暂存目录。先提交 UUID 双文件归属，后以 CREATE_NEW+NOFOLLOW_LINKS 排他创建 facts/part，再请求网络；失败保留材料。空 staging 目录可能先存在，不授予恢复/删除权。私有 sandbox 排除同 UID 恶意写入者，未承诺完全 TOCTOU 安全或目录项 fsync。
@@ -197,7 +197,9 @@ Future<void> pause(String taskId) async {
 - NativePrefixDigest 算法固定 `native-prefix-v1-65536`：64KiB 分块、32字节链及最多64KiB tail；seed 为 SHA256(ASCII `downloader/native-prefix/v1/seed`)。每块 F(domain,chain,index,data,size)=SHA256(ASCII domain || 0x00 || chain || int64BE(index) || int32BE(size) || data[0:size])，完整块域为 `downloader/native-prefix/v1/block`、index 从0开始；snapshot 以 `downloader/native-prefix/v1/end` 域、总 length 与未满 tail 计算64位十六进制摘要，不消费状态。算法名独立保存，不冒充普通文件 SHA256，不 clone provider、不周期重扫历史文件。恢复仍线性读盘重建并认证 prefix，每64KiB检查 Stop。
 - newRecovery 冻结完整已登记 pending resume 命令，核对 payload/NativeCommand/session 一致、本日志 ref、最新执行/代次/期望版本、源 worker 已 finished 且未 cancel、worker/proof/current receiptVersion 相同；在工厂、实际 GET 前、candidate 登记和内部 staged 时重验。beforeRequest 先持久一次性 recovery_attempts，结果不明不得同命令重发网络；inspect/重开不调用该工厂调度。
 - 先认证磁盘 prefix，再实际 GET 携带 Range/If-Range。只接受206、完全一致强 ETag、identity、精确 Content-Range 起点/终点/总长、存在时相符的 Content-Length 与不变的原已知 total；64位溢出拒绝。200/416/redirect、坏/缺/弱验证器、坏 Range 或 prefix 返回 restartRequired，不发确认外的从零请求，不创建输出。
-- 通过实际响应门后先提交 recovery_operations copying/candidate 归属意图，再在私有 canonical 父目录 CREATE_NEW+NOFOLLOW 创建新 candidate，流复制并复验认证 prefix 后才写 suffix；原件和 tail 保留。完整 EOF、force 和真实 close 后才记内部 staged；短 EOF、停止、复制/登记/关闭失败保留原件与候选，不标用户 completed。候选尚不提升为新的恢复源，也没有继续/废弃或受控释放入口。
+- 通过实际响应门后先提交 recovery_operations copying/candidate 归属意图，同事务在 recovery_candidate_files 登记 operation_id 与唯一 facts_path，再在私有 canonical 父目录 CREATE_NEW+NOFOLLOW 创建配对 UUID payload/facts，流复制并复验认证 prefix 后才写 suffix；原件和 tail 保留。完整 EOF、force 和真实 close 后才记内部 staged；复制/登记/关闭失败保留原件与候选，不标用户 completed。
+- candidate_checkpoints 按 operation_id 和唯一 resume_command 保存 source_ref/source_version、固定 receipt_version、offset/total/URL/ETag/digest/algorithm/facts_path。写入重验完整冻结命令/owner/session/key/期望版本及源 worker/proof，且 operation 必须仍为 copying；offset 不倒退、同 offset 摘要不变。原 total 未知可由206确定，之后不漂移。`inspectCandidate(key,resumeCommandId)` 只读指定分支，重开保留、不混入 inspectResume、不自动晋升 current branch 或授权网络；候选继续/废弃/受控释放仍未接入。
+- 同一 Stop 贯穿认证/复制/网络。初始认证停止零 GET/零 candidate；复制停止只保留已登记 partial，不认证未完整复制的 prefix。内部 `Stopped(reason,candidate?,bytes)` 表示真实停止，bytes 仅为源位置/复制诊断，不是新下载量或认证 offset。suffix 暂停须等待真实 input/output/facts 退出及 proof 提交；周期 proof 先双 force，final 先双 close。Stopped 不得掩盖 FILE 关闭或 NETWORK 断连错误，已有首 IO/Journal 错误仍主导。双 close 与最终 proof 回调后重读 Stop，facts.close 期间 late CANCEL 不产生新 proof 或 staged。等待响应头已观察到 stop 时先处理停止，不能将迟到200误报为资源不安全；完整 prefix 复制后暂停也不获取已失效连接的 input。
 - 公开 Coordinator.resume 仍在 register 前明确 restartRequired：当前安全门不替代用户授权、同执行恢复 worker、Service/stop/receipt/幂等协调。下一轮闭合这些边界前不得直接开放。目录 fsync、同 UID 恶意并发替换和设备磁盘故障不在当前已验证保证内。
 
 #### Service 生命周期与停止
@@ -246,13 +248,13 @@ Future<void> pause(String taskId) async {
 
 ### 6. Tests Required
 
-独立 Gradle `:app:testDebugUnitTest :app:compileDebugAndroidTestKotlin :app:assembleDebug` 正常退出、debug APK 构建成功；58项 JVM（协议5＋HTTP20＋Coordinator15＋Lifecycle7＋Resume11）零失败/错误/跳过，flutter analyze 干净。Dart 未改，沿用前轮独立 flutter test 102/102，不声称本轮重跑。最新日志 `/tmp/android-resume-check-{gradle,analyze}.log`；前轮 Service 证据保留在 `/tmp/android-service-recheck-{gradle,analyze,flutter}.log`。
+独立 Gradle `:app:testDebugUnitTest :app:compileDebugAndroidTestKotlin :app:assembleDebug` 正常退出、debug APK 构建成功；70项 JVM（协议5＋HTTP20＋Coordinator15＋Lifecycle7＋Resume23）零失败/错误/跳过，flutter analyze 干净。Dart 未改，沿用前轮独立 flutter test 102/102，不声称本轮重跑。最新日志 `/tmp/android-candidate-check-{gradle,analyze}.log`；前轮 Service 与恢复门证据保留。
 
 - 生产 Lifecycle/Stop/Coordinator 确定性回调/latch：旧 idle/new enqueue/旧 destroy、新旧实例、启动失败立即撤权、foreground/ready 间失效、同实例多个 start 的 timeout、阻塞断连与取消优先。
 - 真实 loopback HTTP/文件：最多两个 worker、未知长度、持久后事件、幂等命令、失败 pause、cancel 优先、终态保存失败不饿死其他下载、显式补存无新 HTTP、提交结果丢失/并发补存/身份变化；Journal 为 host fake，不能称真实 Android SQLite。
 - HTTP 覆盖短EOF/编码/长度/redirect、阻塞读取停止、路径/symlink/sentinel、分配先于网络和 URL 固定；typed phase、生产 fileUse helper 关闭故障不替代真实设备磁盘 force/close。大长度测试仅声明4294967419而实际5字节，不是超过4GiB传输。
-- 恢复测试：独立 Python hashlib/struct 固定向量0/1/65535/65536/65537/131072/200000及重复 snapshot；真实 GET 206/200/416/redirect、强弱验证器、坏 Range/长度/total、源 prefix 与 tail、复制中断、认证中 CANCEL、candidate close、首异常与 typed suppressed 关闭异常。after-force 暂停重读、onSample 早于 proof、facts close 失败不提升 offset。host Journal/候选回调不等同 Android SQLite。
-- 14项 SQLite instrumentation 覆盖重开/确认/并发/回滚/未知版本、v1/v2/v3→v4及第二 DDL 失败回滚、完整 worker 授权、cancel/终态幂等、生产 newTransfer proof 重开和 newRecovery 真实206→candidate→staged、旧 proof/取消/命令一次性及 owner 一致性，但仅 Kotlin 编译，未运行 connectedDebugAndroidTest。后续必须执行 API29/30/33/35/36 的 Service、通知/后台限制、timeout、Activity 重连、强杀重开零 HTTP、TLS、SQLite/磁盘故障和真实大文件；目录 fsync、公开续传协调、候选生命周期与材料清理仍待实施/验收。
+- 恢复测试：独立 Python hashlib/struct 固定向量0/1/65535/65536/65537/131072/200000及重复 snapshot；真实 GET 206/200/416/redirect、强弱验证器、坏 Range/长度/total、源 prefix 与 tail、复制中断、认证中 CANCEL、candidate close、首异常与 typed suppressed 关闭异常。after-force 暂停重读、onSample 早于 proof、facts close/第二 proof commit 失败保留旧 offset；Stopped+close/disconnect 失败不可假成功、facts.close 时 late CANCEL 零 proof/staged、等待头部停止与复制后已断连暂停均用确定 latch。内部第二 core 从新 offset 认证并续传的逐字节/whole SHA256 核验不等同公开 Coordinator 恢复。
+- 15项 SQLite instrumentation 覆盖重开/确认/并发/回滚/未知版本、v1–v4→v5及第二 DDL 失败回滚、完整 worker 授权、cancel/终态幂等、生产 newTransfer proof 重开和 newRecovery 真实206→candidate→staged、旧 proof/取消/命令一次性及 owner 一致性、candidate unknown→known total 和跨 task/generation 精确查询，但仅 Kotlin 编译，未运行 connectedDebugAndroidTest。后续必须执行 API29/30/33/35/36 的 Service、通知/后台限制、timeout、Activity 重连、强杀重开零 HTTP、TLS、SQLite/磁盘故障和真实大文件；目录 fsync、公开续传协调、候选生命周期与材料清理仍待实施/验收。
 
 ### 7. Wrong vs Correct
 

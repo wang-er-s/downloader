@@ -130,3 +130,13 @@ internal object NativeMaterialPaths {
         value != null && value.length >= 2 && value.first() == '"' && value.last() == '"' &&
             value.substring(1, value.length - 1).all { it.code == 0x21 || it.code in 0x23..0x7e || it.code in 0x80..0xff }
 }
+
+/** Candidate branch evidence, deliberately distinct from the currently authorized source proof. */
+internal data class CandidateCheckpoint(
+    val operationId: String,
+    val resumeCommandId: String,
+    val sourceRef: String,
+    val sourceReceiptVersion: Long,
+    val receiptVersion: Long,
+    val forced: ForcedMaterial,
+)

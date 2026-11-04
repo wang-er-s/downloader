@@ -4,7 +4,7 @@
 
 适用于本仓库 Flutter 应用及各平台适配：Android、macOS、Windows 为必需平台，iOS 为希望一并提供、需验证可行性的平台。采用按功能组织目录、MVVM 职责划分、Repository/Service 分层，Riverpod 负责状态管理与依赖注入。复杂业务按需提取 UseCase。
 
-这是已确认的架构约定；领域/执行 DTO、DownloadEngine 与 FileStorage 接口及 AppStore v1 已实现。PluginEngine 与固定 9.5.9 补丁已接入，桌面日志并发、保留原件的安全恢复和当前 macOS 集成已独立复核；整个插件子任务仍未验收。Android 的 Dart 桥接与新下载 Service/Coordinator/HttpTransfer 生产链已有主机局部独立证据；v4 日志、after-force 恢复检查点与内部实际 GET/candidate 安全门也已独立局部 PASS：最新58项 JVM、静态分析和 debug APK 构建通过，Dart 未改沿用前轮独立102项。完整执行键/版本授权、双文件关闭后的最终 proof、有界摘要及原件保留规则见 architecture.md；14项 Android SQLite instrumentation 仅编译，公开 resume 的用户授权/worker/stop/receipt 协调、设备 Service/SQLite/通道与完整引擎仍 BLOCK。公开续传和材料释放仍明确拒绝，取消暂保留材料并报告 cleanupFailure。`lib/main.dart` 仍为计数器，Repository、Riverpod、用户目录发布与业务界面尚未实现。
+这是已确认的架构约定；领域/执行 DTO、DownloadEngine 与 FileStorage 接口及 AppStore v1 已实现。PluginEngine 与固定 9.5.9 补丁已接入，桌面日志并发、保留原件的安全恢复和当前 macOS 集成已独立复核；整个插件子任务仍未验收。Android 的 Dart 桥接与新下载 Service/Coordinator/HttpTransfer 生产链已有主机局部独立证据；v5 日志、after-force 恢复检查点与内部实际 GET/candidate 安全门、候选双文件停止及分支 proof 也已独立局部 PASS：最新70项 JVM、静态分析和 debug APK 构建通过，Dart 未改沿用前轮独立102项。完整执行键/版本授权、双文件关闭后的最终 proof、有界摘要、关闭失败优先于正常停止及原件保留规则见 architecture.md；15项 Android SQLite instrumentation 仅编译，公开 resume 的用户授权/worker/stop/receipt 协调、current branch 晋升、设备 Service/SQLite/通道与完整引擎仍 BLOCK。公开续传和材料释放仍明确拒绝，取消暂保留材料并报告 cleanupFailure。`lib/main.dart` 仍为计数器，Repository、Riverpod、用户目录发布与业务界面尚未实现。
 
 ## 规范入口
 

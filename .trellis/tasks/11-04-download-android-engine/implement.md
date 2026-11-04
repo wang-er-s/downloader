@@ -190,3 +190,38 @@ flutter analyze、flutter test；在 android/ 下运行 ./gradlew :app:testDebug
 - 独立最终Gradle（既有JBR、sdkDownload=false，testDebugUnitTest+compileDebugAndroidTestKotlin+assembleDebug）正常退出0，日志/tmp/android-resume-check-gradle.log。JUnit XML 58项=Protocol5+HTTP20+Coordinator15+Lifecycle7+Resume11，零failure/error/skipped。flutter analyze正常退出No issues found，/tmp/android-resume-check-analyze.log；无Dart变更，沿用上轮独立102项，不声称本轮重跑flutter test。14项SQLite instrumentation仅编译，adb无设备；未安装SDK/改license/启AVD。
 - 审查备份android-resume-review-t7zk27bu可访问；600文件manifest差异仅授权源码/测试和本implement记录，protected10全部MATCH，暂存空，diff --check通过，既有.pi/docs保留。未stage/commit/push/archive，未改task.json/PRD/源规范/frontend specs/非Android实现/依赖或SDK。
 - 内部安全门局部PASS，无剩余本轮源码阻断；完整resume/引擎与设备仍BLOCK。下一最小项是将opaque proof绑定当前进程用户授权与同执行恢复worker，闭合stop/receipt/幂等及candidate继续/废弃/受控释放，不能直接放开公开resume。还需真实SQLite迁移/force-close故障、设备Service与API29/30/33/35/36、目录fsync/用户目录发布和真实>4GiB传输。私有sandbox不声称抵御同UID恶意并发替换；kill后只认已持久事实。
+
+## 显式resume接线本轮计划
+
+先保持58项基线安全门，补恢复candidate双force/final双close检查点、类型化停止与原件保留回归；独立日志v5只新增操作归属的候选proof及精确查询，不扫描或自动选择调度。验证该必要前置后评估完整接线；未能安全闭合的公共resume/worker授权/跨session退休必须继续拒绝，不能简删当前门。
+
+## 本轮实际交付：candidate停止与认证前置，公开resume保持BLOCK
+
+- 本轮没有安全完成公开resume的完整接线，Coordinator仍在register前restartRequired。未更改Runtime/ServiceLifecycle/DownloadService/Coordinator/Dart；不把删除拒绝或放松v4 sourceproof=current门当接线。必须下一轮原子区分冻结source proof/version与新worker授权version，并闭合跨session显式退休、resume终态补存及当前branch选择。
+- 已交付真实ResumeTransfer前置：初始prefix/复制阶段停止抛内部Stopped(reason,candidate?,bytes)，区别于资源restartRequired；同一个Stop贯穿认证/复制/网络，CANCEL高于PAUSE。完整prefix复制后的suffix暂停等待input/output/facts真实关闭，返回带真实stop的Staged事实，不调用stagedCandidate；CANCEL不推进candidate proof。复制中断只保留已登记partial，不冒充完整prefix。
+- candidate现有operation在文件创建前同事务登记payload和派生facts路径；两个文件CREATE_NEW+NOFOLLOW。新增after-force候选proof回调：周期payload.force+facts.force后保存，最终两文件close成功才保存，progress不提升proof，file/EOF/Journal错误只保留较早认证offset。使用原NativePrefixDigest的有界64KiB算法，whole-file SHA256仍覆盖复制prefix+suffix，原源和旧candidate均保留。
+- 独立日志v5逐步保留v1-v4数据，新增recovery_candidate_files和candidate_checkpoints；proof绑定operation、完整resume command、冻结source ref/version、当前仍固定的expected receipt版本、完整执行归属、candidate路径/强ETag/URL/total/offset/digest/algorithm。newRecovery现有工厂真实注入候选proof持久回调，在所有原validate门后写入；inspectCandidate(key,resumeCommandId)精确branch查询，不混入inspectResume，不自动授予下一次网络。它是候选证据，不是已闭合的新worker/current branch能力。
+- 验证：android目录既有JBR执行./gradlew -Pandroid.builder.sdkDownload=false :app:testDebugUnitTest :app:compileDebugAndroidTestKotlin :app:assembleDebug正常退出0，日志/tmp/android-resume-wiring-delivery-final.log。63项JVM=Protocol5+HTTP20+Coordinator15+Lifecycle7+Resume16，失败/错误/跳过0。新增5项：suffix pause候选新prefix→下一内部core Range从新offset继续并逐字节/wholeSHA256核验；facts关闭失败零final proof；复制中PAUSE/CANCEL优先typed停止；CANCEL零proof；progress回调失败只留较早双force offset且保留未提交tail。旧初始认证CANCEL回归改为检查Stopped而非restartRequired，仍在首64KiB停止、零GET。两次core测试显式host proof边界，不是公开Coordinator恢复入口验证。
+- SQLite instrumentation共15项仅编译，新增v4→v5保历史和第二DDL失败回滚；加强已有真实newRecovery Socket测试：候选proof绑定/精确查询/重开/原source不隐式切branch。旧v1/v2/v3迁移fixture相应移除v5表后重建，保留旧迁移失败测试。adb无设备，不能声称真实SQLite/Service运行通过。
+- flutter analyze正常退出No issues found，/tmp/android-resume-wiring-analyze.log；Dart未改，未重跑前轮独立102项flutter test。原生各轮均正常退出，无失败重跑或超时算通过。未安装SDK/改license/启AVD。
+- 599文件manifest仅7个授权已有文件变化；protected10全部hash匹配。git diff --check通过、暂存空；既有.pi2修改/docs保护。未stage/commit/push/archive、未改task.json/PRD/frontend/source specs/共享模型/其他平台/依赖/SDK/manifest。任务保持in_progress、PRD未勾、完整平台BLOCK。
+- 精确下一步仍需实现：v6或等效新resume worker授权/accept queued事务固定源proof与sourceversion；当前session和旧进程授权显式retire；Coordinator/Service同执行恢复worker、resume命令补存；candidate proof晋升为确定当前branch并对外诚实resumeSupport/ref。在这些一起闭合前不可开放用户resume，也未运行要求的“真实loopback经生产Coordinator resume入口”测试。本轮仅关闭candidate停止/proof前置，不宣称本轮原定公开交付目标完成。
+
+## candidate前置独立复核（2026-11-04，局部PASS／公开resume未交付）
+
+- 依当前check.jsonl六条、PRD、任务design/implement最新完整章节和实施完整report核验生产ResumeTransfer、v5 newRecovery注入及双文件/候选事务。此前源主体约束沿用；未开放公开resume，Service/Coordinator/Runtime/Lifecycle/HttpTransfer/Dart未改。ExecutionJournal备份差异仅自动格式化增加换行、花括号、尾逗号，已逐段核对无语义变化。
+- 修复Stopped遮盖真实close错误：复制中Stopped若伴随payload/facts关闭故障，提升真实FILE错误为失败并保留Stopped诊断；Stopped若伴随disconnect故障，同样保留NETWORK错误，不能当暂停成功。已有首IO/Journal错误仍主导，后续关闭异常仅suppressed。Stopped.bytes仅认证源位置或复制诊断，不是任务新下载字节/可恢复offset。
+- 修复late停止快照：最终stop改在payload/facts真实关闭、final proof回调之后重新读取；facts.close时CANCEL不能误标staged。等待响应头时先处理已观察到的停止，不把停止触发的断流/迟到200误判资源不安全；完整prefix复制与input获取之间的暂停跳过失效连接获取，仍等待双close及proof提交。
+- 新增7项真实loopback/文件主机回归：复制Stopped+payload close失败、Stopped+disconnect失败、facts.close内late CANCEL、等待响应头迟到200、周期proof后的facts close失败、第二次proof commit失败、prefix复制后实际disconnect完成再暂停（latch等待、双close先于proof）。原有内部第二core从新offset Range继续、逐字节/wholeSHA256、24576原件与未提交tail、CANCEL>PAUSE及progress失败均保留。无sleep代替时序，不把host回调当生产Coordinator验收。
+- v5回调真实注入且复用v4所有冻结命令/source worker/ref/version门；candidate/facts在同operation事务先登记、再CREATE_NEW/NOFOLLOW；周期双force、final双close之后才认证。offset单调、同offset digest一致、total后续固定、算法/URL/ETag不混合；phase只允许copying写proof，staged后拒绝。精确inspectCandidate不混入inspectResume，不晋升branch或调度网络。设备测试补原source total未知→实际206建立known total、跨task拒绝/跨generation返回null及重开精确查询；15项仍仅编译。v4→v5第二DDL失败回滚第一DDL/版本和保历史断言保留。
+- 最终独立Gradle既有JBR且sdkDownload=false运行testDebugUnitTest+compileDebugAndroidTestKotlin+assembleDebug正常退出0，/tmp/android-candidate-check-gradle.log；JUnit XML70=Protocol5+HTTP20+Coordinator15+Lifecycle7+Resume23，failures/errors/skipped均0。首次检查编译因Throwable与StageFailure的Exception参数类型不匹配失败，已修正，/tmp/android-candidate-check-first-failure.log保留，不称全部首跑成功。flutter analyze正常退出No issues found，/tmp/android-candidate-check-analyze.log。Dart未改，沿用前轮独立102项，不称重跑；adb无设备，未启AVD/装SDK/改license。
+- 备份android-candidate-review-_x4kjmd6可访问，599文件manifest差异仅允许文件（含journal自动格式化），protected10全部匹配；git diff --check干净，暂存为空。未stage/commit/push/archive或改PRD/task.json/其他规范/既有.pi/docs。PRD全未勾，任务in_progress。
+- 本前置源码局部PASS；公开resume与完整引擎/设备总体BLOCK。下一轮最小接受事务应同时冻结不可变source proof/ref/历史版本N和新worker授权，queued回执推进到N+1只更新新授权版本；后续worker回调按新授权/current版本核验，不再要求历史source版本等于新head，也不能全局放宽v4门。显式新session用户命令才可记录旧授权retired/waitingRecovery，真实finished与授权退休分开，不由inspect或存在文件推断。该事务连同Coordinator/Service恢复worker、停止/终态补存、branch晋升及生产resume入口回归应作为下一交付一起闭合，避免再次只交helper。候选继续/废弃/受控释放、设备SQLite/Service/磁盘故障/API矩阵、目录fsync/用户发布和真实>4GiB仍待验收。
+
+## v5 候选材料检查点规范同步与提交（2026-11-04）
+
+父代理核对完整独立报告与ResumeTransfer实际差异：Stopped/close优先级、双close后late CANCEL、响应头停止和复制后已断连input门均保留。独立70项JVM（5+20+15+7+23）零失败/错误/跳过、Gradle实际正常退出并构建debug APK、analyze干净；Dart未改沿用前轮102项，15项SQLite instrumentation仅编译。前置局部PASS，不是公开resume或设备验收。
+
+frontend architecture/index与源design同步v5双候选表、inspectCandidate分支、周期双force/final双close及错误/停止优先级；七节契约和Markdown本地链接/围栏/尾换行通过。599文件审查基线仅授权代码/测试/任务记录及本轮三份规范不同，protected10匹配、暂存为空、diff检查干净。提交仅本任务7个实施文件与3份规范，排除既有.pi和docs；不归档、不勾PRD，父任务完成数仍1/7。
+
+下一轮必须从生产Coordinator.resume验收：acceptResume原子冻结源证明版本N、queued N+1/不可变接受结果/独立新worker授权；运行时确认无当前活动worker后仅显式新session用户命令可退休旧授权，真实finished与retired分开。沿用ServiceLifecycle及2worker，接实际恢复worker与当前branch晋升、pause/cancel、持久事件和resume终态本地补存；真实paused→resume→再次pause/continue、幂等/旧身份/未知结果及保存重试零额外GET均需回归。不能再把只加helper作为公开接线交付。

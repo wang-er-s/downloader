@@ -82,6 +82,122 @@ class ResumeTransferTest {
         return headers.toByteArray() + body
     }
 
+    @Test fun pauseBetweenPrefixCopyAndInputAcquisitionClosesBeforeProof() {
+        val disconnected = java.util.concurrent.CountDownLatch(1)
+        val stop = HttpTransfer.Stop(disconnect = { it.disconnect(); disconnected.countDown() })
+        server({ response() }) { url, requests -> Fixture().use { f ->
+            var closes = 0
+            var proofs = 0
+            val transfer = ResumeTransfer(f.root, material(f, url), { _, _ -> }, { fail("paused staged") }, {},
+                closeCandidate = { it.close(); closes++ },
+                onCheckpoint = { _, proof ->
+                    assertEquals(2, closes); assertEquals(8192L, proof.offset)
+                    assertEquals(material(f, url).forced.prefixDigest, proof.prefixDigest); proofs++
+                },
+                monotonicNanos = {
+                    stop.request(HttpTransfer.Stop.Reason.PAUSE)
+                    assertTrue(disconnected.await(5, java.util.concurrent.TimeUnit.SECONDS)); 0L
+                })
+            val result = transfer.run(stop)
+            assertEquals(HttpTransfer.Stop.Reason.PAUSE, result.stop)
+            assertEquals(1, proofs); assertEquals(2, closes); assertEquals(1, requests.get())
+        } }
+    }
+
+    @Test fun stopWhileAwaitingHeadersIsNotUnsafeResourceFailure() {
+        val stop = HttpTransfer.Stop(disconnect = {}) // hold transport open to deterministically deliver a late unsafe response
+        server({ stop.request(HttpTransfer.Stop.Reason.PAUSE); response(status = 200) }) { url, requests -> Fixture().use { f ->
+            val original = hash(f.source)
+            val transfer = ResumeTransfer(f.root, material(f, url), { _, _ -> fail("stopped candidate") }, { fail() }, {})
+            try { transfer.run(stop); fail() }
+            catch (error: ResumeTransfer.Stopped) { assertEquals(HttpTransfer.Stop.Reason.PAUSE, error.reason); assertNull(error.candidate) }
+            assertEquals(1, requests.get()); assertEquals(1, f.dir.list()!!.size); assertEquals(original, hash(f.source))
+        } }
+    }
+
+    @Test fun factsCloseFailureRetainsEarlierDoubleForcedProof() {
+        server({ response(range = "bytes 8192-208191/208192", length = "200000", body = ByteArray(200000) { 13 }) }) { url, _ -> Fixture().use { f ->
+            val proofs = mutableListOf<ForcedMaterial>()
+            var clocks = 0
+            var closes = 0
+            var candidate: File? = null
+            val closeError = java.io.IOException("facts close after periodic proof")
+            val transfer = ResumeTransfer(f.root, material(f, url, 208192), { _, file -> candidate = file }, { fail() }, {},
+                closeCandidate = { it.close(); if (++closes == 2) throw closeError },
+                onCheckpoint = { _, proof -> proofs.add(proof) },
+                monotonicNanos = { if (clocks++ == 0) 0L else 2_000_000_000L })
+            try { transfer.run(); fail() }
+            catch (error: HttpTransfer.StageFailure) { assertEquals("fileWriteFailure", error.code); assertSame(closeError, error.cause) }
+            assertEquals(1, proofs.size)
+            assertTrue(candidate!!.length() > proofs.single().offset)
+            assertEquals(proofs.single().prefixDigest, NativePrefixDigest.read(candidate!!, proofs.single().offset).snapshot())
+        } }
+    }
+
+    @Test fun stoppedCopyCannotHidePayloadCloseFailure() {
+        server({ response() }) { url, _ -> Fixture().use { f ->
+            val stop = HttpTransfer.Stop()
+            val original = hash(f.source)
+            val closeError = java.io.IOException("payload close failed during stop")
+            var closes = 0
+            val transfer = ResumeTransfer(f.root, material(f, url), { _, _ -> }, { fail("staged") }, {},
+                closeCandidate = { it.close(); if (++closes == 1) throw closeError },
+                onCheckpoint = { _, _ -> fail("partial prefix proof") })
+            try { transfer.run(stop, onCopied = { stop.request(HttpTransfer.Stop.Reason.PAUSE) }); fail("close failure hidden") }
+            catch (error: HttpTransfer.StageFailure) {
+                assertEquals("fileWriteFailure", error.code); assertSame(closeError, error.cause)
+                assertTrue(error.suppressed.single() is ResumeTransfer.Stopped)
+            }
+            assertEquals(2, closes); assertEquals(original, hash(f.source))
+        } }
+    }
+
+    @Test fun cancellationDuringFactsClosePreventsProofAndStaging() {
+        server({ response() }) { url, _ -> Fixture().use { f ->
+            val stop = HttpTransfer.Stop()
+            var closes = 0
+            var proofs = 0
+            val transfer = ResumeTransfer(f.root, material(f, url), { _, _ -> }, { fail("late cancel staged") }, {},
+                closeCandidate = { it.close(); if (++closes == 2) stop.request(HttpTransfer.Stop.Reason.CANCEL) },
+                onCheckpoint = { _, _ -> proofs++ })
+            val result = transfer.run(stop)
+            assertEquals(HttpTransfer.Stop.Reason.CANCEL, result.stop)
+            assertEquals(2, closes); assertEquals(0, proofs)
+        } }
+    }
+
+    @Test fun stoppedCopyCannotHideDisconnectFailure() {
+        server({ response() }) { url, _ -> Fixture().use { f ->
+            val stop = HttpTransfer.Stop()
+            val closeError = java.io.IOException("disconnect failed during stop")
+            val transfer = ResumeTransfer(f.root, material(f, url), { _, _ -> }, { fail() }, {},
+                disconnect = { it.disconnect(); throw closeError })
+            try { transfer.run(stop, onCopied = { stop.request(HttpTransfer.Stop.Reason.CANCEL) }); fail() }
+            catch (error: HttpTransfer.StageFailure) {
+                assertEquals("networkUnavailable", error.code); assertSame(closeError, error.cause)
+                assertTrue(error.suppressed.single() is ResumeTransfer.Stopped)
+            }
+        } }
+    }
+
+    @Test fun checkpointCommitFailurePreservesEarlierProofAndUncommittedTail() {
+        server({ response(range = "bytes 8192-208191/208192", length = "200000", body = ByteArray(200000) { 13 }) }) { url, _ -> Fixture().use { f ->
+            val original = hash(f.source)
+            var prior: ForcedMaterial? = null
+            var candidate: File? = null
+            var clock = 0L
+            val commitError = java.io.IOException("proof commit failed")
+            val transfer = ResumeTransfer(f.root, material(f, url, 208192), { _, file -> candidate = file }, { fail() }, {},
+                onCheckpoint = { _, proof -> if (prior == null) prior = proof else throw commitError },
+                monotonicNanos = { clock += 2_000_000_000L; clock })
+            try { transfer.run(); fail() }
+            catch (error: HttpTransfer.StageFailure) { assertEquals("persistenceFailure", error.code); assertSame(commitError, error.cause) }
+            assertTrue(candidate!!.length() > prior!!.offset)
+            assertEquals(prior!!.prefixDigest, NativePrefixDigest.read(candidate!!, prior!!.offset).snapshot())
+            assertEquals(original, hash(f.source)); assertEquals(24576L, f.source.length())
+        } }
+    }
+
     @Test fun exact206CreatesOwnedCandidateAndPreservesUncommittedSourceTail() {
         for (length in listOf("8192", null)) {
             server({ request ->
@@ -303,7 +419,7 @@ class ResumeTransferTest {
             var verified = 0L
             val transfer = ResumeTransfer(f.root, proof, { _, _ -> fail("candidate after cancellation") }, { fail() }, { fail("GET after cancellation") })
             try { transfer.run(stop, onVerified = { verified = it; stop.request(HttpTransfer.Stop.Reason.CANCEL) }); fail() }
-            catch (error: EngineProtocolException) { assertEquals("restartRequired", error.reason) }
+            catch (error: ResumeTransfer.Stopped) { assertEquals(HttpTransfer.Stop.Reason.CANCEL, error.reason); assertNull(error.candidate) }
             assertEquals(65536L, verified)
             assertEquals(original, hash(f.source))
             assertEquals(1, f.dir.list()!!.size)
@@ -322,6 +438,99 @@ class ResumeTransferTest {
             assertFalse(staged)
             assertTrue(owned!!.exists())
             assertEquals(original, hash(f.source))
+        } }
+    }
+
+    @Test fun candidatePauseProofCanAuthenticateNextCoreBranchWithoutTouchingOriginal() {
+        Fixture().use { f ->
+            val original = hash(f.source)
+            var saved: ForcedMaterial? = null
+            var firstCandidate: File? = null
+            server({ response(range = "bytes 8192-32767/32768", length = "24576", body = ByteArray(8192) { 42 }) }) { url, _ ->
+                val stop = HttpTransfer.Stop()
+                val transfer = ResumeTransfer(f.root, material(f, url, 32768), { _, file -> firstCandidate = file }, { fail("paused candidate staged") }, {},
+                    onCheckpoint = { _, proof ->
+                        assertEquals(proof.prefixDigest, NativePrefixDigest.read(proof.source, proof.offset).snapshot())
+                        saved = proof
+                    })
+                val result = transfer.run(stop, onSample = { assertNull(saved); stop.request(HttpTransfer.Stop.Reason.PAUSE) })
+                assertEquals(HttpTransfer.Stop.Reason.PAUSE, result.stop)
+                assertEquals(16384L, result.bytes)
+                assertEquals(16384L, saved!!.offset)
+            }
+            val retained = hash(firstCandidate!!)
+            server({ request ->
+                assertTrue(request.contains("Range: bytes=16384-"))
+                response(range = "bytes 16384-32767/32768", length = "16384", body = ByteArray(16384) { 9 })
+            }) { url, _ ->
+                val next = NativeResumeMaterial("candidate-ref", "resume-1", 7, saved!!.copy(effectiveUrl = url)) // native host proof boundary; not public scheduling
+                val result = ResumeTransfer(f.root, next, { _, file -> assertNotEquals(firstCandidate, file) }, {}, {}).run()
+                val expected = f.source.readBytes().copyOf(8192) + ByteArray(8192) { 42 } + ByteArray(16384) { 9 }
+                assertArrayEquals(expected, result.file.readBytes())
+                assertEquals(MessageDigest.getInstance("SHA-256").digest(expected).joinToString("") { "%02x".format(it) }, result.sha256)
+                assertEquals(retained, hash(firstCandidate!!))
+                assertEquals(original, hash(f.source))
+                assertEquals(24576L, f.source.length())
+            }
+        }
+    }
+
+    @Test fun candidateFactsCloseFailureDoesNotCertifyFinalProof() {
+        server({ response() }) { url, _ -> Fixture().use { f ->
+            var closed = 0
+            var proofs = 0
+            var staged = false
+            val failure = java.io.IOException("facts-close")
+            val transfer = ResumeTransfer(f.root, material(f, url), { _, _ -> }, { staged = true }, {}, closeCandidate = {
+                it.close(); closed++
+                if (closed == 2) throw failure
+            }, onCheckpoint = { _, _ -> proofs++ })
+            try { transfer.run(); fail("facts close accepted") }
+            catch (error: HttpTransfer.StageFailure) { assertSame(failure, error.cause); assertEquals("fileWriteFailure", error.code) }
+            assertEquals(2, closed); assertEquals(0, proofs); assertFalse(staged)
+        } }
+    }
+
+    @Test fun pauseDuringCopyHasTypedStopAndRetainsOwnedPartialCandidate() {
+        server({ response() }) { url, _ -> Fixture().use { f ->
+            val stop = HttpTransfer.Stop()
+            val original = hash(f.source)
+            var candidate: File? = null
+            val transfer = ResumeTransfer(f.root, material(f, url), { _, file -> candidate = file }, { fail() }, {}, onCheckpoint = { _, _ -> fail("partial prefix proof") })
+            try { transfer.run(stop, onCopied = { stop.request(HttpTransfer.Stop.Reason.PAUSE); stop.request(HttpTransfer.Stop.Reason.CANCEL) }); fail() }
+            catch (error: ResumeTransfer.Stopped) {
+                assertEquals(HttpTransfer.Stop.Reason.CANCEL, error.reason)
+                assertEquals(candidate, error.candidate)
+            }
+            assertTrue(candidate!!.exists()); assertEquals(original, hash(f.source))
+        } }
+    }
+
+    @Test fun cancelAfterSuffixWriteNeverPromotesCandidateProof() {
+        server({ response() }) { url, _ -> Fixture().use { f ->
+            val stop = HttpTransfer.Stop()
+            var proofs = 0
+            val transfer = ResumeTransfer(f.root, material(f, url), { _, _ -> }, { fail("cancelled staged") }, {}, onCheckpoint = { _, _ -> proofs++ })
+            val result = transfer.run(stop, onSample = { stop.request(HttpTransfer.Stop.Reason.CANCEL) })
+            assertEquals(HttpTransfer.Stop.Reason.CANCEL, result.stop)
+            assertEquals(0, proofs)
+        } }
+    }
+
+    @Test fun progressFailureDoesNotPromoteUnforcedCandidateTail() {
+        server({ response(range = "bytes 8192-208191/208192", length = "200000", body = ByteArray(200000) { 13 }) }) { url, _ -> Fixture().use { f ->
+            val proofs = mutableListOf<ForcedMaterial>()
+            var samples = 0
+            var clock = 0L
+            var candidate: File? = null
+            val transfer = ResumeTransfer(f.root, material(f, url, 208192), { _, file -> candidate = file }, { fail("failed staged") }, {},
+                onCheckpoint = { _, proof -> proofs.add(proof) }, monotonicNanos = { clock += 2_000_000_000L; clock })
+            try { transfer.run(onSample = { samples++; if (samples == 2) throw java.io.IOException("sample persistence failure before force") }); fail() }
+            catch (error: HttpTransfer.StageFailure) { assertEquals("persistenceFailure", error.code) }
+            assertEquals(1, proofs.size)
+            val prior = proofs.single()
+            assertTrue(candidate!!.length() > prior.offset)
+            assertEquals(prior.prefixDigest, NativePrefixDigest.read(candidate!!, prior.offset).snapshot())
         } }
     }
 
