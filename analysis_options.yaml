@@ -26,3 +26,9 @@ linter:
 
 # Additional information about this file can be found at
 # https://dart.dev/guides/language/analysis-options
+
+# The vendored example is a separate Flutter app with its own dev dependencies.
+# Production plugin Dart remains in this application's analysis scope.
+analyzer:
+  exclude:
+    - third_party/background_downloader/example/**

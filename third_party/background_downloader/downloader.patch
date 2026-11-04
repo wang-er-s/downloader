@@ -1,0 +1,1990 @@
+--- a/ios/background_downloader/Sources/background_downloader/BDPlugin.swift
++++ b/ios/background_downloader/Sources/background_downloader/BDPlugin.swift
+@@ -85,6 +85,16 @@
+         _Concurrency.Task { @MainActor () -> Void in
+             // to allow async/await
+             switch call.method {
++            case "recordExecution":
++                guard let args = call.arguments as? [Any], args.count == 2,
++                      let taskJson = args[0] as? String,
++                      let data = taskJson.data(using: .utf8),
++                      let task = try? JSONDecoder().decode(Task.self, from: data),
++                      let changes = args[1] as? [String: Any] else {
++                    result(FlutterError(code: "protocolMismatch", message: "Invalid execution record", details: nil))
++                    return
++                }
++                result(ExecutionJournal.record(task, changes))
+             case "reset":
+                 await methodReset(call: call, result: result)
+             case "enqueue":
+@@ -254,6 +264,11 @@
+             os_log("Could not decode %@ to Task", log: log, taskJsonString)
+             return false
+         }
++        if isResume && resumeData == nil {
++            processStatusUpdate(task: task, status: .failed,
++                taskException: TaskException(type: .resume, description: "restartRequired: invalid resume data"))
++            return false
++        }
+         // Check if the file should be skipped
+         if !isResume {
+             let skipThreshold = UserDefaults.standard.object(forKey: BDPlugin.keyConfigSkipExistingFiles) as? Int ?? -1
+@@ -705,7 +720,7 @@
+             result("{}")
+             return
+         }
+-        defaults.removeObject(forKey: key)
++        // Replayable legacy read: execution acknowledgement owns reclamation.
+         result(jsonString)
+         return
+     }
+@@ -867,7 +882,7 @@
+         if value != nil {
+             defaults.set(value, forKey: key)
+         } else {
+-            defaults.removeObject(forKey: key)
++            // Replayable legacy read: execution acknowledgement owns reclamation.
+         }
+         result(nil)
+     }
+--- /dev/null
++++ b/ios/background_downloader/Sources/background_downloader/ExecutionJournal.swift
+@@ -0,0 +1,61 @@
++import Foundation
++
++/// Vendor-owned execution records. The application translates this wire format.
++/// Callbacks are serialized through this lock, including version allocation and
++/// atomic publication. No acknowledgement rewrites the current snapshot.
++enum ExecutionJournal {
++    static let lock = NSRecursiveLock()
++    static var lastSamples = [String: UInt64]()
++    static var resumeOffsets = [String: Int64]()
++
++    static func directory(_ task: Task) -> URL? {
++        guard let data = task.metaData.data(using: .utf8),
++              let metadata = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
++              let path = metadata["executionJournal"] as? String else { return nil }
++        return URL(fileURLWithPath: path, isDirectory: true)
++    }
++
++    @discardableResult static func record(_ task: Task, _ changes: [String: Any]) -> Bool {
++        guard let directory = directory(task) else { return true }
++        lock.lock()
++        defer { lock.unlock() }
++        do {
++            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
++            let versions = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
++                .filter { $0.pathExtension == "json" && Int($0.deletingPathExtension().lastPathComponent) != nil }
++                .sorted { Int($0.deletingPathExtension().lastPathComponent)! < Int($1.deletingPathExtension().lastPathComponent)! }
++            var value: [String: Any] = ["protocolVersion": 1, "downloadedBytes": 0, "totalBytes": NSNull()]
++            if let last = versions.last {
++                value = try JSONSerialization.jsonObject(with: Data(contentsOf: last)) as! [String: Any]
++            }
++            let version = (value["receiptVersion"] as? Int ?? 0) + 1
++            value["task"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(task))
++            value.merge(changes) { _, new in new }
++            value["receiptVersion"] = version
++            let file = directory.appendingPathComponent("\(version).json")
++            try JSONSerialization.data(withJSONObject: value).write(to: file, options: .atomic)
++            let handle = try FileHandle(forWritingTo: file)
++            try handle.synchronize()
++            try handle.close()
++            return true
++        } catch {
++            // Do not deliver a receipt that has not been saved.
++            NSLog("background_downloader: execution journal write failed")
++            return false
++        }
++    }
++
++    static func bytes(_ task: Task, written: Int64, expected: Int64) {
++        lock.lock()
++        defer { lock.unlock() }
++        let now = DispatchTime.now().uptimeNanoseconds / 1_000_000
++        if now - (lastSamples[task.taskId] ?? 0) < 1000 { return }
++        lastSamples[task.taskId] = now
++        // URLSession's cumulative delegate value includes its resumed offset.
++        // didResumeAtOffset establishes the minimum accepted cumulative value.
++        let bytes = max(written, resumeOffsets[task.taskId] ?? 0)
++        record(task, ["downloadedBytes": bytes,
++                      "totalBytes": expected < 0 ? NSNull() : NSNumber(value: expected),
++                      "sampleMonotonicMs": now])
++    }
++}
+--- a/ios/background_downloader/Sources/background_downloader/TaskFunctions.swift
++++ b/ios/background_downloader/Sources/background_downloader/TaskFunctions.swift
+@@ -376,6 +376,8 @@
+         return
+     }
+ 
++    guard ExecutionJournal.record(task, ["status": status.rawValue,
++        "exception": taskException.flatMap { try? JSONSerialization.jsonObject(with: JSONEncoder().encode($0)) } ?? NSNull()]) else { return }
+     // Normal status update
+ 
+     // Post update if task expects one, or if failed and retry is needed
+@@ -432,7 +434,9 @@
+         // remove references to this task that are no longer needed
+         BDPlugin.propertyLock.withLock {
+             BDPlugin.progressInfo.removeValue(forKey: task.taskId)
+-            BDPlugin.localResumeData.removeValue(forKey: task.taskId)
++            if ExecutionJournal.directory(task) == nil {
++                BDPlugin.localResumeData.removeValue(forKey: task.taskId)
++            }
+             BDPlugin.remainingBytesToDownload.removeValue(forKey: task.taskId)
+             BDPlugin.tasksWithModifications.removeValue(forKey: task.taskId)
+             BDPlugin.tasksWithContentLengthOverride.removeValue(forKey: task.taskId)
+@@ -484,6 +488,10 @@
+ /// Sends the data via the background channel to Dart
+ func processResumeData(task: Task, resumeData: Data) -> Bool {
+     let resumeDataAsBase64String = resumeData.base64EncodedString()
++    guard ExecutionJournal.record(task, ["resumeData": [
++        "task": (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(task))) ?? [:],
++        "data": resumeDataAsBase64String, "requiredStartByte": 0,
++        "eTag": NSNull()]]) else { return false }
+     BDPlugin.propertyLock.withLock {
+         BDPlugin.localResumeData[task.taskId] = resumeDataAsBase64String
+     }
+@@ -554,6 +562,8 @@
+ /// [item] is a JsonEncoded Data object
+ func storeLocally(prefsKey: String, taskId: String,
+                   item: Data) {
++    ExecutionJournal.lock.lock()
++    defer { ExecutionJournal.lock.unlock() }
+     let defaults = UserDefaults.standard
+     var map = defaults.dictionary(forKey: prefsKey) ?? [:]
+     map[taskId] = String(data: item, encoding: .utf8)
+--- a/ios/background_downloader/Sources/background_downloader/UrlSessionDelegate.swift
++++ b/ios/background_downloader/Sources/background_downloader/UrlSessionDelegate.swift
+@@ -270,9 +270,19 @@
+             BDPlugin.remainingBytesToDownload[task.taskId] = l - totalBytesWritten
+             return l
+         })
++        ExecutionJournal.bytes(task, written: totalBytesWritten, expected: contentLength)
+         updateProgress(task: task, totalBytesExpected: contentLength, totalBytesDone: totalBytesWritten)
+     }
+     
++    public func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
++                           didResumeAtOffset fileOffset: Int64, expectedTotalBytes: Int64) {
++        guard let task = getTaskFrom(urlSessionTask: downloadTask) else { return }
++        ExecutionJournal.lock.lock()
++        ExecutionJournal.resumeOffsets[task.taskId] = fileOffset
++        ExecutionJournal.lastSamples.removeValue(forKey: task.taskId)
++        ExecutionJournal.lock.unlock()
++    }
++
+     /// Process taskdelegate progress update for upload task
+     ///
+     /// If the task requires progress updates, provide these at a reasonable interval
+@@ -405,11 +415,17 @@
+                         try FileManager.default.createDirectory(at: directoryUri, withIntermediateDirectories: true)
+                     }
+                     
+-                    if FileManager.default.fileExists(atPath: fileUrl.path) {
+-                        try FileManager.default.removeItem(at: fileUrl)
+-                    }
+-                    
++                    if ExecutionJournal.directory(task) == nil {
++                        if FileManager.default.fileExists(atPath: fileUrl.path) {
++                            try FileManager.default.removeItem(at: fileUrl)
++                        }
++                    }
++                    // This delegate is synchronous: register and protect the
++                    // callback-owned temporary file before returning to iOS.
++                    guard ExecutionJournal.record(task, ["stagingLocation": fileUrl.path]) else { return }
+                     try FileManager.default.moveItem(at: location, to: fileUrl)
++                    let size = (try FileManager.default.attributesOfItem(atPath: fileUrl.path)[.size] as? NSNumber)?.int64Value ?? 0
++                    guard ExecutionJournal.record(task, ["stagingLocation": fileUrl.path, "downloadedBytes": size]) else { return }
+                     
+                     do {
+                         if UserDefaults.standard.bool(forKey: BDPlugin.keyConfigExcludeFromCloudBackup)
+--- a/lib/background_downloader.dart
++++ b/lib/background_downloader.dart
+@@ -17,3 +17,5 @@
+ export 'src/queue/task_queue.dart';
+ export 'src/task.dart';
+ export 'src/uri/uri_utils.dart';
++
++export 'src/execution_journal.dart';
+--- a/lib/src/base_downloader.dart
++++ b/lib/src/base_downloader.dart
+@@ -1,3 +1,4 @@
++import 'execution_journal.dart';
+ import 'dart:async';
+ import 'dart:convert';
+ import 'dart:io';
+@@ -32,6 +33,9 @@
+ /// - Task updates provided to the [FileDownloader]
+ /// - Pause/resume status and information
+ abstract base class BaseDownloader {
++  /// Native pause awaits the system stop; desktop also joins its worker.
++  Future<void> waitForExecutionIdle(Task task) async {}
++
+   final log = Logger('BaseDownloader');
+ 
+   static const databaseVersion = 1;
+@@ -515,7 +519,7 @@
+       );
+       if (task != null) {
+         final resumeData = await getResumeData(task.taskId);
+-        if (resumeData != null) {
++        if (resumeData != null && ExecutionJournal.directoryFor(task) == null) {
+           if (task is ParallelDownloadTask) {
+             final chunks = List<Chunk>.from(
+               jsonDecode(resumeData.data, reviver: Chunk.listReviver),
+@@ -745,6 +749,7 @@
+ 
+   /// Clear pause and resume info associated with this [task]
+   void _clearPauseResumeInfo(Task task) {
++    if (ExecutionJournal.directoryFor(task) != null) return;
+     canResumeTask.remove(task);
+     removeResumeData(task.taskId);
+     removePausedTask(task.taskId);
+--- a/lib/src/desktop/desktop_downloader.dart
++++ b/lib/src/desktop/desktop_downloader.dart
+@@ -16,6 +16,7 @@
+ import '../base_downloader.dart';
+ import '../chunk.dart';
+ import '../exceptions.dart';
++import '../execution_journal.dart';
+ import '../file_downloader.dart';
+ import '../models.dart';
+ import '../task.dart';
+@@ -147,9 +148,6 @@
+     }
+ 
+     final resumeData = await getResumeData(task.taskId);
+-    if (resumeData != null) {
+-      await removeResumeData(task.taskId);
+-    }
+     final isResume = _resume.remove(task) && resumeData != null;
+     // spawn an isolate to do the task
+     final receivePort = ReceivePort();
+@@ -234,7 +232,8 @@
+             charSet,
+           );
+           if (updatedTask.group != BaseDownloader.chunkGroup) {
+-            if (status.isFinalState) {
++            if (status.isFinalState &&
++                ExecutionJournal.directoryFor(updatedTask) == null) {
+               _remove(updatedTask);
+             }
+             processStatusUpdate(taskStatusUpdate);
+@@ -267,11 +266,15 @@
+             )?.send(taskProgressUpdate);
+           }
+ 
++        case ('bytesUpdate', int _, int? _, int _):
++          // Already durable in the execution journal before isolate delivery.
++          break;
++
+         case ('taskCanResume', bool taskCanResume):
+           setCanResume(task, taskCanResume);
+ 
+         case ('resumeData', String data, int requiredStartByte, String? eTag):
+-          setResumeData(ResumeData(task, data, requiredStartByte, eTag));
++          await setResumeData(ResumeData(task, data, requiredStartByte, eTag));
+ 
+         // from [ParallelDownloadTask]
+         case ('enqueueChild', DownloadTask childTask):
+@@ -383,6 +386,7 @@
+         .where((task) => taskIds.contains(task.taskId))
+         .toList(growable: false);
+     for (final task in inQueue) {
++      ExecutionJournal.record(task, {'status': TaskStatus.canceled.index});
+       processStatusUpdate(TaskStatusUpdate(task, TaskStatus.canceled));
+       _remove(task);
+     }
+@@ -417,6 +421,17 @@
+       } on StateError {
+         return null;
+       }
++    }
++  }
++
++  @override
++  Future<void> waitForExecutionIdle(Task task) async {
++    final clock = Stopwatch()..start();
++    while (_running.any((running) => running.taskId == task.taskId)) {
++      if (clock.elapsed > const Duration(seconds: 30)) {
++        throw TimeoutException('Execution worker has not stopped');
++      }
++      await Future<void>.delayed(const Duration(milliseconds: 1));
+     }
+   }
+ 
+--- a/lib/src/desktop/download_isolate.dart
++++ b/lib/src/desktop/download_isolate.dart
+@@ -4,6 +4,8 @@
+ import 'dart:math';
+ 
+ import 'package:http/http.dart' as http;
++import 'material_digest.dart';
++import '../execution_journal.dart';
+ import 'package:path/path.dart' as p;
+ import 'package:path_provider/path_provider.dart';
+ 
+@@ -33,6 +35,9 @@
+   // use downloadTask from here on as a 'global' variable in this isolate,
+   // as we may change the filename of the task
+   downloadTask = task;
++  downloadDigest = null;
++  downloadCheckpointFailed = false;
++  downloadMaterial = null;
+   var filePath = await downloadTask.filePath();
+   // tempFilePath is taken from [resumeDataString] if this is a resuming task.
+   // Otherwise, it is a generated full path to the temp directory
+@@ -40,15 +45,21 @@
+       isResume && resumeData != null
+           ? resumeData.tempFilepath
+           : p.join(
+-            tempFilePathConfig ?? (await getTemporaryDirectory()).path,
++            ExecutionJournal.directoryFor(task)?.path ??
++                tempFilePathConfig ??
++                (await getTemporaryDirectory()).path,
+             'com.bbflight.background_downloader${Random().nextInt(1 << 32).toString()}',
+           );
+   final requiredStartByte =
+       resumeData?.requiredStartByte ?? 0; // start for resume
+   final eTag = resumeData?.eTag;
+-  isResume =
+-      isResume &&
+-      await determineIfResumeIsPossible(tempFilePath, requiredStartByte);
++  if (isResume &&
++      (!await determineIfResumeIsPossible(tempFilePath, requiredStartByte) ||
++          !await materialMatches(task, tempFilePath))) {
++    taskException = TaskResumeException('restartRequired: localMaterial');
++    processStatusUpdateInIsolate(task, TaskStatus.failed, sendPort);
++    return;
++  }
+   final client = DesktopDownloader.httpClientForUrl(downloadTask.url);
+   var request = http.Request(
+     downloadTask.httpRequestMethod,
+@@ -63,6 +74,7 @@
+     final resumeRange = (taskRangeStartByte + requiredStartByte, taskRange.$2);
+     final newRangeString = 'bytes=${resumeRange.$1}-${resumeRange.$2 ?? ""}';
+     request.headers['Range'] = newRangeString;
++    if (eTag != null) request.headers['If-Range'] = eTag;
+   }
+   if (downloadTask.post case String post) {
+     request.body = post;
+@@ -81,10 +93,14 @@
+         taskCanResume = serverAcceptsRanges;
+         sendPort.send(('taskCanResume', taskCanResume));
+       }
+-      isResume =
+-          isResume && response.statusCode == 206; // confirm resume response
+-      if (isResume && (eTagHeader != eTag || eTag?.startsWith('W/') == true)) {
+-        throw TaskException('Cannot resume: ETag is not identical, or is weak');
++      if (isResume &&
++          (response.statusCode != 206 ||
++              eTag == null ||
++              !eTag.startsWith('"') ||
++              !eTag.endsWith('"') ||
++              eTag.startsWith('W/') ||
++              eTagHeader != eTag)) {
++        throw TaskResumeException('restartRequired: responseOrValidator');
+       }
+       if (!downloadTask.hasFilename) {
+         downloadTask = await taskWithSuggestedFilename(
+@@ -147,7 +163,7 @@
+   int requiredStartByte,
+ ) async {
+   if (File(tempFilePath).existsSync()) {
+-    if (await File(tempFilePath).length() == requiredStartByte) {
++    if (await File(tempFilePath).length() >= requiredStartByte) {
+       return true;
+     } else {
+       log.fine('Partially downloaded file is corrupted, resume not possible');
+@@ -179,14 +195,59 @@
+   // we attempt to extract from [Task.headers], allowing developer to
+   // set the content length if already known
+   final contentLength = getContentLength(response.headers, downloadTask);
+-  isResume = isResume && response.statusCode == 206;
++  if (isResume && !await materialMatches(downloadTask, tempFilePath)) {
++    taskException = TaskResumeException('restartRequired: localMaterial');
++    return TaskStatus.failed;
++  }
+   if (isResume && !await prepareResume(response, tempFilePath)) {
+-    deleteTempFile(tempFilePath);
+     return TaskStatus.failed;
+   }
+   var resultStatus = TaskStatus.failed;
+   var actualTempFilePath = tempFilePath;
+   IOSink? outStream;
++  // A failed/interrupted prefix copy must not reach the transfer finalizer:
++  // it has no authority to authenticate the original uncommitted tail.
++  if (isResume && await File(tempFilePath).length() > startByte) {
++    actualTempFilePath = await forkCheckpoint(
++      downloadTask,
++      tempFilePath,
++      startByte,
++    );
++  }
++  if (isResume) {
++    final journal = ExecutionJournal.directoryFor(downloadTask);
++    final expected =
++        journal == null
++            ? null
++            : ExecutionJournal.latest(journal)?['materialHash'];
++    if (journal == null) {
++      // Preserve upstream non-adapter tasks, which have no material journal.
++      final state = MaterialDigest();
++      await for (final bytes in File(
++        actualTempFilePath,
++      ).openRead(0, startByte)) {
++        state.add(bytes);
++      }
++      if (state.length != startByte) {
++        throw TaskResumeException('restartRequired: prefixChanged');
++      }
++      downloadDigest = state;
++    } else {
++      if (expected is! String) {
++        throw TaskResumeException('restartRequired: missingDigest');
++      }
++      downloadDigest = await MaterialDigest.verify(
++        File(actualTempFilePath),
++        startByte,
++        expected,
++      );
++      if (downloadDigest == null) {
++        throw TaskResumeException('restartRequired: prefixChanged');
++      }
++    }
++  } else {
++    downloadDigest = MaterialDigest();
++  }
+   try {
+     // do the actual download
+     try {
+@@ -209,6 +270,19 @@
+         rethrow;
+       }
+     }
++    if (!isResume) {
++      ExecutionJournal.record(downloadTask, {
++        'resumeData':
++            ResumeData(
++              downloadTask,
++              actualTempFilePath,
++              0,
++              eTagHeader,
++            ).toJson(),
++        'materialHash': downloadDigest!.snapshot(),
++      });
++    }
++    downloadMaterial = File(actualTempFilePath);
+     final transferBytesResult = await transferBytes(
+       response.stream,
+       outStream,
+@@ -220,31 +294,28 @@
+     switch (transferBytesResult) {
+       case TaskStatus.complete:
+         // copy file to destination, creating dirs if needed
+-        await outStream.flush();
++        try {
++          await outStream.flush();
++        } catch (_) {
++          downloadCheckpointFailed = true;
++          rethrow;
++        }
++        if (downloadDigest!.length != bytesTotal + startByte ||
++            File(actualTempFilePath).lengthSync() != downloadDigest!.length) {
++          downloadCheckpointFailed = true;
++          throw FileSystemException('Completed download length mismatch');
++        }
+         final dirPath = p.dirname(filePath);
+         Directory(dirPath).createSync(recursive: true);
+         File(actualTempFilePath).copySync(filePath);
+         resultStatus = TaskStatus.complete;
+ 
+       case TaskStatus.canceled:
+-        deleteTempFile(actualTempFilePath);
+         resultStatus = TaskStatus.canceled;
+ 
+       case TaskStatus.paused:
+-        if (taskCanResume) {
+-          sendPort.send((
+-            'resumeData',
+-            actualTempFilePath,
+-            bytesTotal + startByte,
+-            eTagHeader,
+-          ));
+-          resultStatus = TaskStatus.paused;
+-        } else {
+-          taskException = TaskResumeException(
+-            'Task was paused but cannot resume',
+-          );
+-          resultStatus = TaskStatus.failed;
+-        }
++        // Even an unresumable resource must stop and preserve its bytes.
++        resultStatus = TaskStatus.paused;
+ 
+       case TaskStatus.failed:
+         break;
+@@ -259,25 +330,49 @@
+     try {
+       try {
+         await outStream?.close();
+-      } catch (_) {}
+-      if (resultStatus == TaskStatus.failed &&
+-          serverAcceptsRanges &&
+-          (bytesTotal + startByte > 1 << 20 || isResume)) {
+-        // send ResumeData to allow resume after fail
+-        sendPort.send((
+-          'resumeData',
+-          actualTempFilePath,
+-          bytesTotal + startByte,
+-          eTagHeader,
+-        ));
+-      } else if (resultStatus != TaskStatus.paused) {
++      } catch (e) {
++        setTaskError(e);
++        rethrow;
++      }
++      if (downloadCheckpointFailed) {
++        throw FileSystemException(
++          'Prior checkpoint failed; retaining authenticated prefix',
++        );
++      }
++      if (resultStatus != TaskStatus.complete) {
++        final material = File(actualTempFilePath);
++        if (material.existsSync()) {
++          final state = downloadDigest;
++          if (state == null ||
++              state.length != bytesTotal + startByte ||
++              material.lengthSync() != state.length) {
++            throw FileSystemException('Stopped download length mismatch');
++          }
++          final offset = state.length;
++          final data = ResumeData(
++            downloadTask,
++            actualTempFilePath,
++            offset,
++            eTagHeader,
++          );
++          ExecutionJournal.record(downloadTask, {
++            'resumeData': data.toJson(),
++            'materialHash': state.snapshot(),
++            'downloadedBytes': offset,
++          });
++          sendPort.send(('resumeData', actualTempFilePath, offset, eTagHeader));
++        }
++      } else {
++        ExecutionJournal.record(downloadTask, {
++          'stagingLocation': filePath,
++          'downloadedBytes': bytesTotal + startByte,
++        });
+         File(actualTempFilePath).deleteSync();
+       }
+     } catch (e) {
+-      logError(
+-        downloadTask,
+-        'Could not delete temp file $actualTempFilePath: $e',
+-      );
++      logError(downloadTask, 'Could not persist execution material: $e');
++      // Do not publish paused/complete after a failed durable checkpoint.
++      rethrow;
+     }
+   }
+   return resultStatus;
+@@ -286,7 +381,7 @@
+ /// Prepare for resume if possible
+ ///
+ /// Returns true if task can continue, false if task failed.
+-/// Extracts and parses Range headers, and truncates temp file
++/// Validates the requested suffix before opening the original file.
+ Future<bool> prepareResume(
+   http.StreamedResponse response,
+   String tempFilePath,
+@@ -299,41 +394,38 @@
+     );
+     return false;
+   }
+-  final contentRangeRegEx = RegExp(r"(\d+)-(\d+)/(\d+)");
+-  final matchResult = contentRangeRegEx.firstMatch(range);
+-  if (matchResult == null) {
+-    log.fine('Could not process partial response Content-Range $range');
+-    taskException = TaskResumeException(
+-      'Could not process '
+-      'partial response Content-Range $range',
+-    );
++  final match = RegExp(r'^bytes (\d+)-(\d+)/(\d+)$').firstMatch(range);
++  final directory = ExecutionJournal.directoryFor(downloadTask);
++  final checkpoint =
++      directory == null
++          ? null
++          : ExecutionJournal.latest(directory)?['resumeData'] as Map?;
++  final length =
++      checkpoint?['requiredStartByte'] as int? ??
++      await File(tempFilePath).length();
++  if (response.statusCode != 206 || match == null) {
++    taskException = TaskResumeException('restartRequired: contentRange');
+     return false;
+   }
+-  final start = int.parse(matchResult.group(1) ?? '0');
+-  final end = int.parse(matchResult.group(2) ?? '0');
+-  final total = int.parse(matchResult.group(3) ?? '0');
+-  final tempFile = File(tempFilePath);
+-  final tempFileLength = await tempFile.length();
+-  log.finest(
+-    'Resume start=$start, end=$end of total=$total bytes, tempFile = $tempFileLength bytes',
+-  );
+-  startByte = start - taskRangeStartByte; // relative to start of range
+-  if (startByte > tempFileLength) {
+-    log.fine('Offered range not feasible: $range with startByte $startByte');
+-    taskException = TaskResumeException(
+-      'Offered range not feasible: $range with startByte $startByte',
+-    );
++  final start = int.parse(match.group(1)!);
++  final end = int.parse(match.group(2)!);
++  final total = int.parse(match.group(3)!);
++  final requestedEnd = parseRange(downloadTask.headers['Range'] ?? '').$2;
++  final expectedEnd = min(requestedEnd ?? total - 1, total - 1);
++  final journal = ExecutionJournal.directoryFor(downloadTask);
++  final knownTotal =
++      journal == null ? null : ExecutionJournal.latest(journal)?['totalBytes'];
++  if ((downloadTask.headers['Range'] == null &&
++          knownTotal != null &&
++          total != knownTotal) ||
++      start != taskRangeStartByte + length ||
++      end < start ||
++      end != expectedEnd ||
++      response.contentLength != end - start + 1) {
++    taskException = TaskResumeException('restartRequired: rangeLength');
+     return false;
+   }
+-  try {
+-    final file = await tempFile.open(mode: FileMode.writeOnlyAppend);
+-    await file.truncate(startByte);
+-    file.close();
+-  } on FileSystemException {
+-    log.fine('Could not truncate temp file');
+-    taskException = TaskResumeException('Could not truncate temp file');
+-    return false;
+-  }
++  startByte = length;
+   return true;
+ }
+ 
+@@ -360,3 +452,77 @@
+     }
+   }
+ }
++
++Future<bool> materialMatches(Task task, String path) async {
++  final directory = ExecutionJournal.directoryFor(task);
++  if (directory == null) return true;
++  final raw = ExecutionJournal.latest(directory);
++  final expected = raw?['materialHash'];
++  final resume = raw?['resumeData'] as Map?;
++  final offset = resume?['requiredStartByte'] as int?;
++  if (expected is! String ||
++      offset == null ||
++      offset < 0 ||
++      !File(path).existsSync() ||
++      await File(path).length() < offset) {
++    return false;
++  }
++  return await MaterialDigest.verify(File(path), offset, expected) != null;
++}
++
++/// Register every private output before creation. Interrupted copies remain
++/// attributable; a retry allocates a new candidate and preserves old evidence.
++Future<String> forkCheckpoint(Task task, String source, int offset) async {
++  final directory = ExecutionJournal.directoryFor(task);
++  if (directory == null) throw TaskResumeException('restartRequired: noOwner');
++  final ownedRoot = directory.resolveSymbolicLinksSync();
++  final sourceFile = File(source);
++  if (FileSystemEntity.typeSync(source, followLinks: false) !=
++          FileSystemEntityType.file ||
++      sourceFile.parent.resolveSymbolicLinksSync() != ownedRoot) {
++    throw TaskResumeException('restartRequired: materialOwnership');
++  }
++  final operation =
++      '${DateTime.now().microsecondsSinceEpoch}-${Random.secure().nextInt(1 << 32)}';
++  final candidate = File(p.join(ownedRoot, 'recovery-$operation.partial'));
++  final raw = ExecutionJournal.latest(directory)!;
++  final materials = <String>{
++    source,
++    ...List<String>.from(raw['ownedMaterials'] as List? ?? []),
++  };
++  materials.add(candidate.path);
++  ExecutionJournal.record(task, {
++    'ownedMaterials': materials.toList(),
++    'recoveryOperation': {
++      'id': operation,
++      'source': source,
++      'candidate': candidate.path,
++      'offset': offset,
++      'phase': 'copying',
++    },
++  });
++  candidate.createSync(exclusive: true);
++  final output = candidate.openWrite();
++  try {
++    await output.addStream(sourceFile.openRead(0, offset));
++    await output.flush();
++  } finally {
++    await output.close();
++  }
++  if (candidate.lengthSync() != offset ||
++      !await materialMatches(task, candidate.path)) {
++    throw TaskResumeException('restartRequired: prefixChanged');
++  }
++  final resume = Map<String, dynamic>.from(raw['resumeData'] as Map);
++  ExecutionJournal.record(task, {
++    'resumeData': {...resume, 'data': candidate.path},
++    'recoveryOperation': {
++      'id': operation,
++      'source': source,
++      'candidate': candidate.path,
++      'offset': offset,
++      'phase': 'ready',
++    },
++  });
++  return candidate.path;
++}
+--- a/lib/src/desktop/isolate.dart
++++ b/lib/src/desktop/isolate.dart
+@@ -5,12 +5,14 @@
+ import 'dart:math';
+ 
+ import 'package:async/async.dart';
++import 'material_digest.dart';
+ import 'package:flutter/foundation.dart';
+ import 'package:flutter/services.dart';
+ import 'package:http/http.dart' as http;
+ import 'package:logging/logging.dart';
+ 
+ import '../exceptions.dart';
++import '../execution_journal.dart';
+ import '../models.dart';
+ import '../task.dart';
+ import 'data_isolate.dart';
+@@ -20,6 +22,40 @@
+ import 'upload_isolate.dart';
+ 
+ /// global variables, unique to this isolate
++final sampleClock = Stopwatch()..start();
++MaterialDigest? downloadDigest;
++File? downloadMaterial;
++bool downloadCheckpointFailed = false;
++
++/// Flush/stat/digest is one checkpoint boundary. No historical file reads.
++Future<void> checkpointDownload(IOSink output, Task task) async {
++  try {
++    await output.flush();
++    final state = downloadDigest;
++    final material = downloadMaterial;
++    if (state == null ||
++        material == null ||
++        state.length != bytesTotal + startByte ||
++        material.lengthSync() != state.length) {
++      throw FileSystemException('Download checkpoint length mismatch');
++    }
++    final directory = ExecutionJournal.directoryFor(task);
++    final current =
++        directory == null ? null : ExecutionJournal.latest(directory);
++    final resume = current?['resumeData'] as Map?;
++    ExecutionJournal.record(task, {
++      if (resume != null)
++        'resumeData': {...resume, 'requiredStartByte': state.length},
++      'materialHash': state.snapshot(),
++      'downloadedBytes': state.length,
++    });
++  } catch (_) {
++    downloadCheckpointFailed = true;
++    rethrow;
++  }
++}
++
++var lastByteCheckpoint = -1000;
+ var bytesTotal = 0; // total bytes read in this download session
+ var startByte =
+     0; // starting position within the original range, used for resume
+@@ -194,6 +230,16 @@
+   SendPort sendPort, [
+   Duration requestTimeout = const Duration(seconds: 60),
+ ]) async {
++  if (task is DownloadTask && outStream is IOSink) {
++    return _transferDownloadBytes(
++      inStream,
++      outStream,
++      contentLength,
++      task,
++      sendPort,
++      requestTimeout,
++    );
++  }
+   if (contentLength == 0) {
+     contentLength = -1;
+   }
+@@ -260,6 +306,10 @@
+   SendPort sendPort,
+ ) {
+   final retryNeeded = status == TaskStatus.failed && task.retriesRemaining > 0;
++  ExecutionJournal.record(task, {
++    'status': status.index,
++    if (taskException != null) 'exception': taskException!.toJson(),
++  });
+   // if task is in final state, process a final progressUpdate
+   // A 'failed' progress update is only provided if
+   // a retry is not needed: if it is needed, a `waitingToRetry` progress update
+@@ -505,3 +555,68 @@
+         now.isAfter(nextProgressUpdateTime)) ||
+     (currentProgress > lastProgressUpdate &&
+         now.isAfter(nextProgressUpdateTime.add(const Duration(seconds: 2))));
++
++// Download accounting follows actual file writes, independently of fractions.
++Future<TaskStatus> _transferDownloadBytes(
++  Stream<List<int>> stream,
++  IOSink output,
++  int length,
++  Task task,
++  SendPort port,
++  Duration timeout,
++) async {
++  try {
++    await for (final chunk in stream.timeout(timeout)) {
++      if (isCanceled) return TaskStatus.canceled;
++      if (isPaused) return TaskStatus.paused;
++      output.add(chunk);
++      bytesTotal += chunk.length;
++      downloadDigest?.add(chunk);
++      if (sampleClock.elapsedMilliseconds - lastByteCheckpoint >= 1000) {
++        await checkpointDownload(output, task);
++        lastByteCheckpoint = sampleClock.elapsedMilliseconds;
++        ExecutionJournal.record(task, {
++          'totalBytes': length < 0 ? null : length + startByte,
++          'sampleMonotonicMs': sampleClock.elapsedMilliseconds,
++        });
++        port.send((
++          'bytesUpdate',
++          bytesTotal + startByte,
++          length < 0 ? null : length + startByte,
++          sampleClock.elapsedMilliseconds,
++        ));
++      }
++      if (length > 0) {
++        final progress = min(
++          (bytesTotal + startByte) / (length + startByte),
++          0.999,
++        );
++        final now = DateTime.now();
++        if (shouldSendProgressUpdate(progress, now)) {
++          processProgressUpdateInIsolate(
++            task,
++            progress,
++            port,
++            length + startByte,
++          );
++          lastProgressUpdate = progress;
++          nextProgressUpdateTime = now.add(const Duration(milliseconds: 500));
++        }
++      }
++    }
++    try {
++      await output.flush();
++    } catch (_) {
++      downloadCheckpointFailed = true;
++      rethrow;
++    }
++    if (length >= 0 && bytesTotal != length) {
++      taskException = TaskConnectionException('Incomplete response body');
++      return TaskStatus.failed;
++    }
++    return TaskStatus.complete;
++  } catch (error) {
++    setTaskError(error);
++    return TaskStatus.failed;
++  }
++}
+--- /dev/null
++++ b/lib/src/desktop/material_digest.dart
+@@ -0,0 +1,91 @@
++import 'dart:convert';
++import 'dart:io';
++import 'dart:typed_data';
++
++import 'package:crypto/crypto.dart';
++
++/// Bounded incremental authentication for private download material.
++/// Chain blocks and the final tail have distinct domains; snapshot never closes
++/// or consumes the running state. No proof array grows with the file.
++final class MaterialDigest {
++  static const blockSize = 1024 * 1024;
++  static const prefix = 'bd-chain-sha256-v1:';
++  final Uint8List _tail = Uint8List(blockSize);
++  List<int> _chain = sha256.convert(utf8.encode('bd-material-v1:seed')).bytes;
++  int _used = 0;
++  int length = 0;
++
++  void add(List<int> bytes) {
++    var position = 0;
++    while (position < bytes.length) {
++      final available = blockSize - _used;
++      final count =
++          bytes.length - position < available
++              ? bytes.length - position
++              : available;
++      _tail.setRange(_used, _used + count, bytes, position);
++      _used += count;
++      position += count;
++      length += count;
++      if (_used == blockSize) {
++        _chain =
++            _hash([utf8.encode('bd-material-v1:block'), _chain, _tail]).bytes;
++        _used = 0;
++      }
++    }
++  }
++
++  String snapshot() {
++    final size = ByteData(8)..setUint64(0, length, Endian.big);
++    return '$prefix${_hash([utf8.encode('bd-material-v1:end'), _chain, size.buffer.asUint8List(), Uint8List.sublistView(_tail, 0, _used)])}';
++  }
++
++  static Digest _hash(List<List<int>> parts) {
++    final result = _DigestResult();
++    final sink = sha256.startChunkedConversion(result);
++    for (final part in parts) {
++      sink.add(part);
++    }
++    sink.close();
++    return result.value!;
++  }
++
++  /// Rebuild from actual disk bytes. Legacy hashes are verified in the same
++  /// pass as the new state; an unknown format never becomes trusted material.
++  static Future<MaterialDigest?> verify(
++    File file,
++    int offset,
++    String expected,
++  ) async {
++    final legacy = RegExp(r'^[0-9a-f]{64}$').hasMatch(expected);
++    if (!legacy && !expected.startsWith(prefix)) return null;
++    if (offset < 0 || !file.existsSync() || file.lengthSync() < offset) {
++      return null;
++    }
++    final state = MaterialDigest();
++    final result = _DigestResult();
++    final old = legacy ? sha256.startChunkedConversion(result) : null;
++    await for (final bytes in file.openRead(0, offset)) {
++      state.add(bytes);
++      old?.add(bytes);
++    }
++    old?.close();
++    if (state.length != offset) return null;
++    return (legacy
++            ? result.value.toString() == expected
++            : state.snapshot() == expected)
++        ? state
++        : null;
++  }
++}
++
++final class _DigestResult implements Sink<Digest> {
++  Digest? value;
++  @override
++  void add(Digest data) {
++    value = data;
++  }
++
++  @override
++  void close() {}
++}
+--- /dev/null
++++ b/lib/src/execution_journal.dart
+@@ -0,0 +1,112 @@
++import 'dart:convert';
++import 'dart:io';
++import 'dart:math';
++import 'package:crypto/crypto.dart';
++import 'package:sqlite3/sqlite3.dart';
++
++import 'task.dart';
++
++/// Private execution protocol. This package never imports application models.
++/// One transfer owns each directory; acknowledgements are separate records and
++/// cannot overwrite a transfer snapshot. Immutable versions make reads replayable.
++class ExecutionJournal {
++  static String materialToken(String value) =>
++      sha256.convert(utf8.encode(value)).toString();
++  static Directory? directoryFor(Task task) {
++    if (task.metaData.isEmpty) return null;
++    final metadata = jsonDecode(task.metaData);
++    if (metadata is! Map || metadata['executionJournal'] is! String) {
++      return null;
++    }
++    return Directory(metadata['executionJournal'] as String);
++  }
++
++  static Map<String, dynamic>? latest(Directory directory) {
++    final files = versions(directory);
++    if (files.isEmpty) return null;
++    return jsonDecode(files.last.readAsStringSync()) as Map<String, dynamic>;
++  }
++
++  static List<File> versions(Directory directory) {
++    if (!directory.existsSync()) return [];
++    final files =
++        directory
++            .listSync()
++            .whereType<File>()
++            .where(
++              (f) =>
++                  RegExp(r'^[0-9]+\.json$').hasMatch(f.uri.pathSegments.last),
++            )
++            .toList();
++    files.sort((a, b) => _version(a).compareTo(_version(b)));
++    return files;
++  }
++
++  static int _version(File f) =>
++      int.parse(f.uri.pathSegments.last.split('.').first);
++
++  static void record(Task task, Map<String, dynamic> changes) {
++    final directory = directoryFor(task);
++    if (directory == null) return;
++    directory.createSync(recursive: true);
++    writeLocked(directory, () {
++      final previous = latest(directory);
++      final version = (previous?['receiptVersion'] as int? ?? 0) + 1;
++      final record = <String, dynamic>{
++        'protocolVersion': 1,
++        'task': task.toJson(),
++        'downloadedBytes': 0,
++        'totalBytes': null,
++        ...?previous,
++        ...changes,
++        'receiptVersion': version,
++      };
++      // Keep evidence from an interrupted/failed publication. A later retry
++      // must not truncate the preceding writer's pending bytes.
++      final nonce =
++          '${DateTime.now().microsecondsSinceEpoch}-${Random.secure().nextInt(1 << 32)}';
++      final temporary = File('${directory.path}/$version.$nonce.pending')
++        ..createSync(exclusive: true);
++      temporary.writeAsStringSync(jsonEncode(record), flush: true);
++      final target = File('${directory.path}/$version.json');
++      if (target.existsSync()) {
++        throw StateError('Receipt version already exists');
++      }
++      temporary.renameSync(target.path);
++    });
++  }
++
++  /// SQLite's process/thread locks serialize distinct isolate connections.
++  /// The OS releases them after process death; no lock-file ownership guessing.
++  static T writeLocked<T>(Directory directory, T Function() action) {
++    directory.createSync(recursive: true);
++    final database = sqlite3.open('${directory.path}/writer.sqlite');
++    try {
++      database.execute('PRAGMA busy_timeout=30000');
++      database.execute('BEGIN IMMEDIATE');
++      try {
++        final result = action();
++        database.execute('COMMIT');
++        return result;
++      } catch (_) {
++        try {
++          database.execute('ROLLBACK');
++        } catch (_) {
++          // Preserve the original publication/commit failure.
++        }
++        rethrow;
++      }
++    } finally {
++      database.close();
++    }
++  }
++
++  static void reclaim(Directory directory, int acknowledgedVersion) {
++    writeLocked(directory, () {
++      final files = versions(directory);
++      for (final file in files.take(files.isEmpty ? 0 : files.length - 1)) {
++        if (_version(file) <= acknowledgedVersion) file.deleteSync();
++      }
++    });
++  }
++}
+--- a/lib/src/file_downloader.dart
++++ b/lib/src/file_downloader.dart
+@@ -3,6 +3,8 @@
+ import 'dart:math';
+ 
+ import 'package:flutter/foundation.dart';
++import 'package:flutter/services.dart';
++import 'execution_journal.dart';
+ import 'package:http/http.dart' as http;
+ import 'package:logging/logging.dart';
+ 
+@@ -770,6 +772,25 @@
+   /// If the task is able to resume, it will, otherwise it will restart the
+   /// task from scratch, or fail.
+   Future<bool> resume(DownloadTask task) => _downloader.resume(task);
++
++  /// Serialize application-side checkpoints with native delegate callbacks.
++  Future<void> recordExecution(Task task, Map<String, dynamic> changes) async {
++    if (defaultTargetPlatform == TargetPlatform.iOS) {
++      final saved = await const MethodChannel('com.bbflight.background_downloader')
++          .invokeMethod<bool>('recordExecution', [jsonEncode(task.toJson()), changes]);
++      if (saved != true) throw StateError('Execution checkpoint was not saved');
++    } else {
++      ExecutionJournal.record(task, changes);
++    }
++  }
++
++  /// Wait for the old worker to leave before reusing its execution directory.
++  Future<void> waitForExecutionIdle(Task task) =>
++      _downloader.waitForExecutionIdle(task);
++
++  /// Restore already persisted execution material, without starting a request.
++  Future<void> restoreExecutionResumeData(ResumeData data) =>
++      _downloader.setResumeData(data);
+ 
+   /// Resume all paused tasks, or those in [tasks], or paused tasks in
+   /// group [group]
+--- a/pubspec.yaml
++++ b/pubspec.yaml
+@@ -12,6 +12,8 @@
+   flutter:
+     sdk: flutter
+   logging: ^1.0.2
++  crypto: ^3.0.6
++  sqlite3: 3.5.2
+   http: ^1.1.0
+   path_provider: ^2.0.2
+   path: ^1.8.1
+--- /dev/null
++++ b/test/execution_boundary_test.dart
+@@ -0,0 +1,377 @@
++import 'dart:async';
++import 'dart:convert';
++import 'dart:io';
++import 'dart:isolate';
++
++import 'package:async/async.dart';
++import 'package:background_downloader/background_downloader.dart';
++import 'package:background_downloader/src/desktop/download_isolate.dart'
++    as transfer;
++import 'package:background_downloader/src/desktop/isolate.dart' as worker;
++import 'package:crypto/crypto.dart';
++import 'package:background_downloader/src/desktop/material_digest.dart';
++import 'package:flutter_test/flutter_test.dart';
++
++void main() {
++  late Directory root;
++  late HttpServer server;
++  late ReceivePort commands;
++  late StreamQueue<dynamic> commandQueue;
++  late ReceivePort updates;
++  late StreamSubscription<dynamic> updateSubscription;
++  late String behavior;
++  late int zeroRequests;
++  final body = List<int>.generate(96 * 1024, (i) => i % 251);
++
++  setUp(() async {
++    HttpOverrides.global = null;
++    root = Directory.systemTemp.createTempSync('plugin-boundary-');
++    behavior = 'safe';
++    zeroRequests = 0;
++    server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
++    server.listen((request) async {
++      final range = request.headers.value('range');
++      final start =
++          range == null
++              ? 0
++              : int.parse(RegExp(r'bytes=(\d+)-').firstMatch(range)!.group(1)!);
++      if (range == null) zeroRequests++;
++      final response = request.response;
++      response.headers.set('Accept-Ranges', 'bytes');
++      if (behavior != 'noETag') {
++        response.headers.set(
++          'ETag',
++          behavior == 'weak'
++              ? 'W/"v1"'
++              : behavior == 'changed'
++              ? '"v2"'
++              : '"v1"',
++        );
++      }
++      if (behavior == '416') {
++        response.statusCode = 416;
++        await response.close();
++        return;
++      }
++      var offset = start;
++      final end =
++          ['shortSuffix', 'changedTotal'].contains(behavior)
++              ? body.length - 1025
++              : body.length - 1;
++      if (range != null && behavior != '200') {
++        response.statusCode = 206;
++        response.headers.set(
++          'Content-Range',
++          'bytes ${behavior == 'badRange' ? start + 1 : start}-${behavior == 'rangeLength' ? body.length - 2 : end}/${behavior == 'changedTotal' ? end + 1 : body.length}',
++        );
++      } else {
++        offset = 0;
++      }
++      if (behavior != 'unknown') response.contentLength = end + 1 - offset;
++      try {
++        for (var i = offset; i <= end; i += 1024) {
++          response.add(body.sublist(i, i + 1024));
++          await response.flush();
++          await Future<void>.delayed(const Duration(milliseconds: 20));
++        }
++        await response.close();
++      } catch (_) {
++        // Expected when a resume is rejected before consuming the body.
++      }
++    });
++    worker.isCanceled = false;
++    worker.isPaused = false;
++    worker.bytesTotal = 0;
++    worker.startByte = 0;
++    worker.taskException = null;
++    worker.lastByteCheckpoint = -1000;
++    transfer.taskRangeStartByte = 0;
++    commands = ReceivePort();
++    commandQueue = StreamQueue<dynamic>(commands);
++    updates = ReceivePort();
++    updateSubscription = updates.listen((_) {});
++  });
++
++  tearDown(() async {
++    await commandQueue.cancel(immediate: true);
++    commands.close();
++    await updateSubscription.cancel();
++    updates.close();
++    await server.close(force: true);
++    root.deleteSync(recursive: true);
++  });
++
++  DownloadTask task() => DownloadTask(
++    taskId: 'execution',
++    url: 'http://127.0.0.1:${server.port}/data',
++    baseDirectory: BaseDirectory.root,
++    directory: root.path,
++    filename: 'staging',
++    allowPause: true,
++    retries: 0,
++    updates: Updates.statusAndProgress,
++    metaData: jsonEncode({'executionJournal': '${root.path}/journal'}),
++  );
++
++  Future<void> run(DownloadTask task, {ResumeData? resume}) =>
++      transfer.doDownloadTask(
++        task,
++        resume,
++        resume != null,
++        const Duration(seconds: 5),
++        root.path,
++        updates.sendPort,
++      );
++
++  for (final format in ['legacy', 'chain']) {
++    for (final mode in [
++      'safe',
++      '200',
++      '416',
++      'changed',
++      'badRange',
++      'badPrefix',
++    ]) {
++      test(
++        'checkpoint8192 with uncommitted tail24576: $format $mode',
++        () async {
++          final input = task();
++          final material = File('${root.path}/journal/original')
++            ..createSync(recursive: true);
++          material.writeAsBytesSync(body.sublist(0, 24576), flush: true);
++          final resume = ResumeData(input, material.path, 8192, '"v1"');
++          ExecutionJournal.record(input, {
++            'status': 7,
++            'downloadedBytes': 8192,
++            'totalBytes': body.length,
++            'resumeData': resume.toJson(),
++            'materialHash':
++                format == 'legacy'
++                    ? sha256.convert(body.sublist(0, 8192)).toString()
++                    : (MaterialDigest()..add(body.sublist(0, 8192))).snapshot(),
++          });
++          if (mode == 'badPrefix') {
++            final file = material.openSync(mode: FileMode.writeOnlyAppend);
++            file.setPositionSync(0);
++            file.writeByteSync(99);
++            file.closeSync();
++          }
++          final before = sha256.convert(material.readAsBytesSync()).toString();
++          behavior = mode;
++          await run(input, resume: resume);
++          expect(material.lengthSync(), 24576);
++          expect(sha256.convert(material.readAsBytesSync()).toString(), before);
++          expect(zeroRequests, 0);
++          if (mode == 'safe') {
++            expect(worker.taskException, isNull);
++            expect(File('${root.path}/staging').readAsBytesSync(), body);
++            final raw =
++                ExecutionJournal.latest(ExecutionJournal.directoryFor(input)!)!;
++            expect(raw['ownedMaterials'], contains(material.path));
++            expect(raw['recoveryOperation']['phase'], 'ready');
++          } else {
++            expect(worker.taskException, isA<TaskResumeException>());
++            expect(File('${root.path}/staging').existsSync(), isFalse);
++          }
++        },
++      );
++    }
++  }
++
++  test(
++    'interrupted prefix copy retains intent and retries without authenticating tail',
++    () async {
++      final input = task();
++      final source = File('${root.path}/journal/original')
++        ..createSync(recursive: true);
++      source.writeAsBytesSync(body.sublist(0, 24576), flush: true);
++      final originalHash = sha256.convert(source.readAsBytesSync()).toString();
++      final resume = ResumeData(input, source.path, 8192, '"v1"');
++      ExecutionJournal.record(input, {
++        'status': 7,
++        'downloadedBytes': 8192,
++        'totalBytes': body.length,
++        'resumeData': resume.toJson(),
++        'materialHash': sha256.convert(body.sublist(0, 8192)).toString(),
++      });
++      final attempt = transfer.forkCheckpoint(input, source.path, 8192);
++      final journal = ExecutionJournal.directoryFor(input)!;
++      final copying = ExecutionJournal.latest(journal)!;
++      expect(copying['recoveryOperation']['phase'], 'copying');
++      final candidate = File(
++        copying['recoveryOperation']['candidate'] as String,
++      );
++      expect(candidate.existsSync(), isTrue);
++      // Filesystem fault at the first asynchronous copy boundary, not OS kill.
++      candidate.deleteSync();
++      final obstruction = Directory(candidate.path)..createSync();
++      await expectLater(attempt, throwsA(anything));
++      obstruction.deleteSync();
++      final failed = ExecutionJournal.latest(journal)!;
++      expect(failed['resumeData'], resume.toJson());
++      expect(failed['downloadedBytes'], 8192);
++      expect(failed['recoveryOperation']['phase'], 'copying');
++      expect(failed['ownedMaterials'], contains(candidate.path));
++      expect(source.lengthSync(), 24576);
++      expect(sha256.convert(source.readAsBytesSync()).toString(), originalHash);
++      await run(input, resume: resume);
++      final complete = ExecutionJournal.latest(journal)!;
++      expect(complete['ownedMaterials'], contains(candidate.path));
++      expect(complete['recoveryOperation']['candidate'], isNot(candidate.path));
++      expect(complete['recoveryOperation']['phase'], 'ready');
++      expect(File('${root.path}/staging').readAsBytesSync(), body);
++      expect(sha256.convert(source.readAsBytesSync()).toString(), originalHash);
++    },
++  );
++
++  test('failed journal publication preserves pending evidence on retry', () {
++    final input = task();
++    ExecutionJournal.record(input, {'status': 1});
++    final directory = ExecutionJournal.directoryFor(input)!;
++    final blocked = Directory('${directory.path}/2.json')..createSync();
++    expect(
++      () => ExecutionJournal.record(input, {'downloadedBytes': 11}),
++      throwsA(isA<FileSystemException>()),
++    );
++    final pending = directory.listSync().whereType<File>().singleWhere(
++      (file) => file.path.endsWith('.pending'),
++    );
++    final evidence = pending.readAsStringSync();
++    expect(ExecutionJournal.latest(directory)!['receiptVersion'], 1);
++    blocked.deleteSync();
++    ExecutionJournal.record(input, {'downloadedBytes': 12});
++    expect(pending.readAsStringSync(), evidence);
++    expect(ExecutionJournal.latest(directory)!['downloadedBytes'], 12);
++  });
++
++  for (final rejected in [
++    '200',
++    '416',
++    'badRange',
++    'weak',
++    'changed',
++    'noETag',
++    'rangeLength',
++    'shortSuffix',
++    'changedTotal',
++    'corrupt',
++    'missing',
++  ]) {
++    test(
++      'actual resume GET rejects $rejected without modifying original material',
++      () async {
++        final input = task();
++        final material = File('${root.path}/journal/partial')
++          ..createSync(recursive: true);
++        material.writeAsBytesSync(body.sublist(0, 4096), flush: true);
++        final digest = sha256.convert(material.readAsBytesSync()).toString();
++        final resume = ResumeData(input, material.path, 4096, '"v1"');
++        ExecutionJournal.record(input, {
++          'status': TaskStatus.paused.index,
++          'downloadedBytes': 4096,
++          'totalBytes': body.length,
++          'resumeData': resume.toJson(),
++          'materialHash': digest,
++        });
++        behavior = rejected;
++        if (rejected == 'corrupt') {
++          material.writeAsBytesSync(List.filled(4096, 42), flush: true);
++        }
++        if (rejected == 'missing') material.deleteSync();
++        final before =
++            material.existsSync()
++                ? sha256.convert(material.readAsBytesSync()).toString()
++                : null;
++        await run(input, resume: resume);
++        expect(worker.taskException, isA<TaskResumeException>());
++        expect(
++          material.existsSync()
++              ? sha256.convert(material.readAsBytesSync()).toString()
++              : null,
++          before,
++        );
++        if (before != null) expect(material.lengthSync(), 4096);
++        expect(zeroRequests, 0);
++        final raw =
++            ExecutionJournal.latest(ExecutionJournal.directoryFor(input)!)!;
++        expect(raw['status'], TaskStatus.failed.index);
++        expect(raw['resumeData'], isNotNull);
++      },
++    );
++  }
++
++  test('actual strong-validator 206 appends exact bytes', () async {
++    final input = task();
++    final material = File('${root.path}/journal/partial')
++      ..createSync(recursive: true);
++    material.writeAsBytesSync(body.sublist(0, 4096), flush: true);
++    final resume = ResumeData(input, material.path, 4096, '"v1"');
++    ExecutionJournal.record(input, {
++      'status': 7,
++      'resumeData': resume.toJson(),
++      'downloadedBytes': 4096,
++      'materialHash': sha256.convert(material.readAsBytesSync()).toString(),
++    });
++    await run(input, resume: resume);
++    expect(worker.taskException, isNull);
++    expect(File('${root.path}/staging').readAsBytesSync(), body);
++    expect(zeroRequests, 0);
++  });
++
++  test(
++    'unknown-length slow body checkpoints increasing actual bytes before EOF',
++    () async {
++      behavior = 'unknown';
++      final input = task();
++      final running = run(input);
++      await Future<void>.delayed(const Duration(milliseconds: 1250));
++      final during =
++          ExecutionJournal.latest(ExecutionJournal.directoryFor(input)!)!;
++      expect(during['downloadedBytes'], greaterThan(0));
++      expect(during['downloadedBytes'], lessThan(body.length));
++      expect(during['totalBytes'], isNull);
++      expect(during['sampleMonotonicMs'], greaterThan(0));
++      await running;
++      final records =
++          ExecutionJournal.versions(
++            ExecutionJournal.directoryFor(input)!,
++          ).map((file) => jsonDecode(file.readAsStringSync()) as Map).toList();
++      final samples =
++          records.where((r) => r['sampleMonotonicMs'] != null).toList();
++      expect(
++        samples.map((r) => r['downloadedBytes']).toSet().length,
++        greaterThan(1),
++      );
++      expect(File('${root.path}/staging').readAsBytesSync(), body);
++    },
++  );
++
++  test(
++    'actual pause stops writes, preserves material and resumes through guarded GET',
++    () async {
++      final input = task();
++      final running = run(input);
++      await Future<void>.delayed(const Duration(milliseconds: 300));
++      worker.isPaused = true;
++      await running;
++      final raw =
++          ExecutionJournal.latest(ExecutionJournal.directoryFor(input)!)!;
++      expect(raw['status'], TaskStatus.paused.index);
++      final resume = ResumeData.fromJson(
++        Map<String, dynamic>.from(raw['resumeData']),
++      );
++      final material = File(resume.data);
++      final size = material.lengthSync();
++      expect(size, greaterThan(0));
++      await Future<void>.delayed(const Duration(milliseconds: 100));
++      expect(material.lengthSync(), size);
++      worker.isPaused = false;
++      worker.bytesTotal = 0;
++      worker.startByte = 0;
++      worker.taskException = null;
++      await run(input, resume: resume);
++      expect(File('${root.path}/staging').readAsBytesSync(), body);
++      expect(zeroRequests, 1);
++    },
++  );
++}
+--- /dev/null
++++ b/test/execution_journal_race_test.dart
+@@ -0,0 +1,91 @@
++import 'dart:async';
++import 'dart:convert';
++import 'dart:io';
++import 'dart:isolate';
++import 'package:background_downloader/background_downloader.dart';
++import 'package:flutter_test/flutter_test.dart';
++
++void writer(List<Object> args) async {
++  final root = args[0] as String;
++  final output = args[1] as SendPort;
++  final start = ReceivePort();
++  output.send(start.sendPort);
++  await start.first;
++  final task = DownloadTask(
++    taskId: 'race',
++    url: 'https://example.org/data',
++    filename: 'data',
++    metaData: jsonEncode({'executionJournal': root}),
++  );
++  var success = 0;
++  var errors = 0;
++  for (var i = 0; i < 100; i++) {
++    try {
++      ExecutionJournal.record(task, {
++        'downloadedBytes': i,
++        'payload': '${args[2]}:$i',
++      });
++      success++;
++    } catch (_) {
++      errors++;
++    }
++  }
++  output.send([success, errors]);
++}
++
++void main() {
++  test(
++    'diagnostic: concurrent journal writers retain every successful record',
++    () async {
++      final root = Directory.systemTemp.createTempSync('journal-race-');
++      final events = ReceivePort();
++      final controls = <SendPort>[];
++      var success = 0;
++      var errors = 0;
++      var finished = 0;
++      final done = Completer<void>();
++      final subscription = events.listen((message) {
++        if (message is SendPort) {
++          controls.add(message);
++          if (controls.length == 4) {
++            for (final port in controls) {
++              port.send(true);
++            }
++          }
++        } else {
++          success += (message as List)[0] as int;
++          errors += message[1] as int;
++          if (++finished == 4) done.complete();
++        }
++      });
++      for (var i = 0; i < 4; i++) {
++        await Isolate.spawn(writer, [root.path, events.sendPort, i]);
++      }
++      await done.future.timeout(const Duration(seconds: 30));
++      final files = ExecutionJournal.versions(root);
++      final records = files.length;
++      final snapshots =
++          files.map((f) => jsonDecode(f.readAsStringSync()) as Map).toList();
++      expect(success, 400);
++      expect(errors, 0);
++      expect(snapshots.map((r) => r['payload']).toSet().length, 400);
++      expect(
++        snapshots.map((r) => r['receiptVersion']).toList(),
++        List.generate(400, (i) => i + 1),
++      );
++      // ignore: avoid_print
++      print(
++        'JOURNAL_RACE successes=$success errors=$errors immutableRecords=$records lost=${success - records}',
++      );
++      await subscription.cancel();
++      events.close();
++      root.deleteSync(recursive: true);
++      expect(
++        records,
++        success,
++        reason:
++            'Each reported durable success requires its own immutable version',
++      );
++    },
++  );
++}
+--- /dev/null
++++ b/test/large_download_checkpoint_test.dart
+@@ -0,0 +1,139 @@
++// Explicit opt-in production HTTP/file test (>4GiB); not part of app test/.
++import 'dart:convert';
++import 'dart:io';
++import 'dart:isolate';
++import 'dart:typed_data';
++
++import 'package:background_downloader/background_downloader.dart';
++import 'package:background_downloader/src/desktop/download_isolate.dart'
++    as transfer;
++import 'package:background_downloader/src/desktop/isolate.dart' as worker;
++import 'package:background_downloader/src/desktop/material_digest.dart';
++import 'package:crypto/crypto.dart';
++import 'package:flutter_test/flutter_test.dart';
++
++void main() {
++  test(
++    'real >4GiB HTTP transfer, bounded checkpoints and stopped file authentication',
++    () async {
++      HttpOverrides.global = null;
++      final root = Directory.systemTemp.createTempSync('download-real-4gib-');
++      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
++      final updates = ReceivePort();
++      const threshold = 4294967296 + 8 * 1024 * 1024;
++      const total = threshold + 128 * 1024 * 1024;
++      final block = Uint8List.fromList(
++        List.generate(64 * 1024, (i) => i % 256),
++      );
++      final expectedBlockHash = sha256.convert(block).toString();
++      var requestedPause = false;
++      final stopClock = Stopwatch();
++      final subscription = updates.listen((message) {
++        if (message is (String, int, int?, int) &&
++            message.$1 == 'bytesUpdate' &&
++            message.$2 >= threshold) {
++          if (!requestedPause) {
++            requestedPause = true;
++            stopClock.start();
++            worker.isPaused = true;
++          }
++        }
++      });
++      var served = 0;
++      final serverSub = server.listen((request) async {
++        request.response.contentLength = total;
++        request.response.headers.set('ETag', '"large-v1"');
++        request.response.headers.set('Accept-Ranges', 'bytes');
++        try {
++          while (served < total) {
++            request.response.add(block);
++            served += block.length;
++            await request.response.flush();
++            if (served >= threshold) {
++              await Future<void>.delayed(const Duration(milliseconds: 2));
++            }
++          }
++          await request.response.close();
++        } catch (_) {}
++      });
++      final task = DownloadTask(
++        taskId: 'large',
++        url: 'http://127.0.0.1:${server.port}/large',
++        directory: root.path,
++        filename: 'staging',
++        baseDirectory: BaseDirectory.root,
++        retries: 0,
++        allowPause: true,
++        updates: Updates.statusAndProgress,
++        metaData: jsonEncode({'executionJournal': '${root.path}/journal'}),
++      );
++      worker.bytesTotal = 0;
++      worker.startByte = 0;
++      worker.isPaused = false;
++      worker.isCanceled = false;
++      worker.taskException = null;
++      worker.lastByteCheckpoint = -1000;
++      final elapsed = Stopwatch()..start();
++      try {
++        await transfer.doDownloadTask(
++          task,
++          null,
++          false,
++          const Duration(seconds: 60),
++          root.path,
++          updates.sendPort,
++        );
++        elapsed.stop();
++        stopClock.stop();
++        final directory = ExecutionJournal.directoryFor(task)!;
++        final raw = ExecutionJournal.latest(directory)!;
++        expect(raw['status'], TaskStatus.paused.index);
++        final offset = raw['downloadedBytes'] as int;
++        expect(offset, greaterThan(4294967296));
++        final material = File(raw['resumeData']['data'] as String);
++        expect(material.lengthSync(), offset);
++        expect(worker.downloadDigest!.length, offset);
++        final checkpointClock = Stopwatch()..start();
++        final output = material.openWrite(mode: FileMode.append);
++        await worker.checkpointDownload(output, task);
++        await output.close();
++        checkpointClock.stop();
++        // Actual complete disk read with content validation, bounded at 64KiB.
++        var verified = 0;
++        await for (final bytes in material.openRead()) {
++          expect(bytes.length, block.length);
++          expect(sha256.convert(bytes).toString(), expectedBlockHash);
++          verified += bytes.length;
++        }
++        expect(verified, offset);
++        expect(raw['materialHash'], startsWith(MaterialDigest.prefix));
++        // No periodic/final historical reads are needed: the live state agrees
++        // with an independent rebuild of the authenticated disk prefix.
++        final verifyClock = Stopwatch()..start();
++        expect(
++          await MaterialDigest.verify(
++            material,
++            offset,
++            raw['materialHash'] as String,
++          ),
++          isNotNull,
++        );
++        verifyClock.stop();
++        // ignore: avoid_print
++        print(
++          'LARGE_HTTP bytes=$offset served=$served transferMs=${elapsed.elapsedMilliseconds} '
++          'pauseMs=${stopClock.elapsedMilliseconds} checkpointMicros=${checkpointClock.elapsedMicroseconds} '
++          'diskRebuildMs=${verifyClock.elapsedMilliseconds} rss=${ProcessInfo.currentRss} peakRss=${ProcessInfo.maxRss} '
++          'digestBufferBytes=${MaterialDigest.blockSize} contentVerified=$verified root=${root.path}',
++        );
++      } finally {
++        await subscription.cancel();
++        updates.close();
++        await server.close(force: true);
++        await serverSub.cancel();
++        root.deleteSync(recursive: true);
++      }
++    },
++    timeout: const Timeout(Duration(minutes: 10)),
++  );
++}
+--- /dev/null
++++ b/test/material_digest_test.dart
+@@ -0,0 +1,212 @@
++import 'dart:io';
++import 'dart:isolate';
++import 'dart:convert';
++import 'dart:typed_data';
++
++import 'package:background_downloader/background_downloader.dart';
++import 'package:background_downloader/src/desktop/material_digest.dart';
++import 'package:background_downloader/src/desktop/isolate.dart' as worker;
++import 'package:crypto/crypto.dart';
++import 'package:flutter_test/flutter_test.dart';
++
++void main() {
++  test('v1 known vectors independently generated with Python hashlib', () {
++    const vectors = <int, String>{
++      0: '1adb379c9e15a18e3b106821eaef2c79e3dea7622a143bdbb3b6fa1a53b54244',
++      1: '5aabecac2eb5cb95b09fb1208dba946a6fdd39b12ce76dc8c2c5da2f6d0a44af',
++      1048575:
++          'caad181731771d6dae3fbd5ebf2c71de3188ce2985c0ff63a7e3b039b6545d22',
++      1048576:
++          '563d155b857b85d04727f38db24ba1629a1a99322012681c226a2e83c8e995d1',
++      1048577:
++          'b34eb0e7c24b92d5ba3d08f1f6ee56db5b400cdffabd62664b068bde0ee62a6c',
++      3145745:
++          'b9481711aeac36a3b3a7b674f645768568ee451eec8b793ed21c2b335f2cf84b',
++    };
++    for (final vector in vectors.entries) {
++      final state =
++          MaterialDigest()..add(
++            Uint8List.fromList(List.generate(vector.key, (i) => i % 251)),
++          );
++      expect(state.length, vector.key);
++      expect(state.snapshot(), '${MaterialDigest.prefix}${vector.value}');
++    }
++  });
++
++  test(
++    'fixed blocks, network slicing, repeated snapshots and continuing state',
++    () {
++      for (final length in [
++        0,
++        1,
++        MaterialDigest.blockSize - 1,
++        MaterialDigest.blockSize,
++        MaterialDigest.blockSize + 1,
++        3 * MaterialDigest.blockSize + 17,
++      ]) {
++        final bytes = Uint8List.fromList(List.generate(length, (i) => i % 251));
++        final whole = MaterialDigest()..add(bytes);
++        final sliced = MaterialDigest();
++        for (var i = 0; i < bytes.length; i += 7919) {
++          sliced.add(
++            Uint8List.sublistView(
++              bytes,
++              i,
++              i + 7919 < length ? i + 7919 : length,
++            ),
++          );
++          final before = sliced.snapshot();
++          expect(sliced.snapshot(), before);
++        }
++        expect(sliced.snapshot(), whole.snapshot());
++        sliced.add([9, 8, 7]);
++        whole.add([9, 8, 7]);
++        expect(sliced.snapshot(), whole.snapshot());
++      }
++    },
++  );
++
++  test(
++    'legacy/new prefix verification, tail exclusion, tampering and unknown formats',
++    () async {
++      final root = Directory.systemTemp.createTempSync('material-digest-');
++      try {
++        final data = Uint8List.fromList(
++          List.generate(MaterialDigest.blockSize + 17, (i) => i % 251),
++        );
++        final file = File('${root.path}/data')
++          ..writeAsBytesSync([...data, 88, 99]);
++        final state = MaterialDigest()..add(data);
++        final old = sha256.convert(data).toString();
++        expect(
++          (await MaterialDigest.verify(file, data.length, old))!.snapshot(),
++          state.snapshot(),
++        );
++        expect(
++          (await MaterialDigest.verify(
++            file,
++            data.length,
++            state.snapshot(),
++          ))!.snapshot(),
++          state.snapshot(),
++        );
++        expect(
++          await MaterialDigest.verify(
++            file,
++            data.length,
++            'bd-chain-sha256-v2:bad',
++          ),
++          isNull,
++        );
++        final handle = file.openSync(mode: FileMode.writeOnlyAppend)
++          ..setPositionSync(4);
++        handle.writeByteSync(99);
++        handle.closeSync();
++        expect(await MaterialDigest.verify(file, data.length, old), isNull);
++        expect(
++          await MaterialDigest.verify(file, data.length, state.snapshot()),
++          isNull,
++        );
++      } finally {
++        root.deleteSync(recursive: true);
++      }
++    },
++  );
++
++  test(
++    'production checkpoint requires only flush/stat, never historical reads',
++    () async {
++      final root = Directory.systemTemp.createTempSync('material-no-read-');
++      try {
++        final task = DownloadTask(
++          taskId: 'no-read',
++          url: 'https://example.org/data',
++          metaData: jsonEncode({'executionJournal': root.path}),
++        );
++        final state = MaterialDigest()..add([1, 2, 3]);
++        worker.downloadDigest = state;
++        worker.downloadMaterial = _StatOnlyFile(3);
++        worker.downloadCheckpointFailed = false;
++        worker.bytesTotal = 3;
++        worker.startByte = 0;
++        await worker.checkpointDownload(_FlushOnlySink(), task);
++        final first = ExecutionJournal.latest(root)!;
++        expect(first['materialHash'], state.snapshot());
++        expect(first['downloadedBytes'], 3);
++        expect(worker.downloadCheckpointFailed, isFalse);
++      } finally {
++        root.deleteSync(recursive: true);
++      }
++    },
++  );
++
++  test(
++    'flush or length failure preserves prior authenticated checkpoint',
++    () async {
++      final root = Directory.systemTemp.createTempSync('material-write-fault-');
++      final port = ReceivePort();
++      try {
++        final file = File('${root.path}/material')..writeAsBytesSync([1, 2, 3]);
++        final task = DownloadTask(
++          taskId: 'write-fault',
++          url: 'https://example.org/data',
++          metaData: jsonEncode({'executionJournal': root.path}),
++        );
++        ExecutionJournal.record(task, {
++          'downloadedBytes': 0,
++          'materialHash': (MaterialDigest()).snapshot(),
++        });
++        worker.downloadDigest = MaterialDigest()..add([1, 2, 3]);
++        worker.downloadMaterial = file;
++        worker.bytesTotal = 3;
++        worker.startByte = 0;
++        final sink = file.openWrite(mode: FileMode.append);
++        await expectLater(
++          worker.checkpointDownload(_BrokenFlush(sink), task),
++          throwsStateError,
++        );
++        expect(ExecutionJournal.latest(root)!['downloadedBytes'], 0);
++        await sink.close();
++        worker.downloadDigest = MaterialDigest()..add([1, 2, 3, 4]);
++        final other = file.openWrite(mode: FileMode.append);
++        await expectLater(
++          worker.checkpointDownload(other, task),
++          throwsA(isA<FileSystemException>()),
++        );
++        expect(ExecutionJournal.latest(root)!['downloadedBytes'], 0);
++        await other.close();
++      } finally {
++        port.close();
++        root.deleteSync(recursive: true);
++      }
++    },
++  );
++}
++
++final class _BrokenFlush implements IOSink {
++  _BrokenFlush(this.delegate);
++  final IOSink delegate;
++  @override
++  Future<void> flush() async => throw StateError('injected flush failure');
++  @override
++  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
++}
++
++final class _StatOnlyFile implements File {
++  _StatOnlyFile(this.size);
++  final int size;
++  @override
++  int lengthSync() => size;
++  @override
++  Stream<List<int>> openRead([int? start, int? end]) =>
++      throw StateError('historical read forbidden');
++  @override
++  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
++}
++
++final class _FlushOnlySink implements IOSink {
++  @override
++  Future<void> flush() async {}
++  @override
++  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
++}
