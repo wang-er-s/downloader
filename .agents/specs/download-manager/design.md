@@ -6,7 +6,7 @@
 
 依据：[需求文档](requirements.md)、[需求评审](review.md)、[Flutter 架构规范](../../../.trellis/spec/frontend/architecture.md)。截图仅作为界面与交互参考，不扩展代理、分享、认证资源、视频解析、搜索、批量管理等首期范围。
 
-**状态：用户已批准进入实施；领域契约与 AppStore v1 已通过独立检查，PluginEngine 与固定 9.5.9 补丁已实现并通过桌面局部复核，插件子任务仍为 BLOCK/in_progress。** 本稿替换原 Android 单平台方案。已有接口见[持久化契约](../../../.trellis/spec/frontend/persistence.md)，当前执行行为/证据/平台限制见[插件执行契约](../../../.trellis/spec/frontend/plugin-engine.md)。Android 原生协议/日志及 Dart AndroidEngine 桥接已通过局部独立检查，真实 SQLite、原生服务与端到端仍 BLOCK；Repository、Android 传输、用户目录发布和业务 UI 尚未实现。
+**状态：用户已批准进入实施；领域契约与 AppStore v1 已通过独立检查，PluginEngine 与固定 9.5.9 补丁已实现并通过桌面局部复核，插件子任务仍为 BLOCK/in_progress。** 本稿替换原 Android 单平台方案。已有接口见[持久化契约](../../../.trellis/spec/frontend/persistence.md)，当前执行行为/证据/平台限制见[插件执行契约](../../../.trellis/spec/frontend/plugin-engine.md)。Android 原生协议/日志、Dart AndroidEngine 桥接及内部 HttpTransfer 新下载核心已通过局部独立检查；HttpTransfer 尚未接服务/通道，安全续传未实现。真实 Android SQLite、原生服务与端到端仍 BLOCK；Repository、Android 传输服务集成、用户目录发布和业务 UI 尚未实现。
 
 ### 已确认的生命周期差异
 
@@ -23,7 +23,7 @@ iOS 用户主动在多任务界面强制退出会触发系统取消后台传输�
 - `lib/main.dart` 只有 `MyApp`、`MyHomePage`、`_MyHomePageState`；保留 Flutter 入口和平台工程，替换计数器首页。
 - `test/widget_test.dart` 仍是计数器测试，界面子任务后续替换；领域/DTO 与真实 SQLite 基础测试 48 项通过，另有插件并发、真实 HTTP 与 macOS 集成。`pubspec.yaml` 精确引入 sqlite3 3.5.2、path_provider 2.1.6 和显式 path 9.5.9 插件。
 - 四个平台工程均已存在，不能将“工程存在”当成下载能力已经支持。
-- Android 的 `MainActivity.kt` 已接入进程持有的 MethodChannel/EventChannel 与独立执行日志，`lib/features/downloads/data/android_engine.dart` 已完成通道桥接和业务确认前置核验；尚无 worker 或前台服务，传输方法明确返回 transferUnavailable。原生 ack 暂拒绝全部材料释放；主 manifest 尚无自有下载服务配置，release 仍使用 debug 签名；真实 SQLite 测试仅编译，不能视为设备通过。
+- Android 的 `MainActivity.kt` 已接入进程持有的 MethodChannel/EventChannel 与独立执行日志，`lib/features/downloads/data/android_engine.dart` 已完成通道桥接和业务确认前置核验；内部 `HttpTransfer.kt` 的新下载、未知总长字节、排他私有暂存与停止关闭屏障通过主机真实 HTTP 独立检查（协议5项＋HTTP11项）。目前只有测试调用方，尚无 worker 或前台服务，通道传输方法仍返回 transferUnavailable，续传明确 restartRequired。facts 仅作诊断，不作为恢复证明；停止请求不等于实际退出，须等待退出并提交执行日志后才交付回执。原生 ack 暂拒绝全部材料释放；主 manifest 尚无自有下载服务配置，release 仍使用 debug 签名；真实 SQLite 测试仅编译，设备 TLS/磁盘故障、恢复归属和真实超过4GiB传输未验收。
 - `ios/Runner/Info.plist` 是基础配置，需要核对后台会话交付、明文 HTTP 策略、签名及目录授权。
 - macOS DebugProfile/Release entitlements 已启用 sandbox 并新增客户端联网；用户下载目录/持久授权仍未实现，不能只验证 debug。
 - `windows/CMakeLists.txt` 保留现有 Flutter 原生资产打包方式，后续核验 SQLite 和插件二进制是否进入 release 包。

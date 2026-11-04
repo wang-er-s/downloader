@@ -165,7 +165,7 @@ Future<void> pause(String taskId) async {
 
 ### 1. Scope / Trigger
 
-适用于 AndroidEngineChannels、EngineProtocol、ExecutionJournal 及 Dart AndroidEngine 调用方。2026-11-04 协议代码、实际 Kotlin 编译、五项 JVM 测试和 Dart 桥接 94 项测试通过；三项 Android SQLite instrumentation 仅编译。服务/HTTP/设备生命周期仍未实现或未验收。
+适用于 AndroidEngineChannels、EngineProtocol、ExecutionJournal 及 Dart AndroidEngine 调用方。2026-11-04 协议代码、实际 Kotlin 编译、五项 JVM 协议测试和 Dart 桥接 94 项测试通过；另有内部 HttpTransfer 的11项主机真实 HTTP 测试通过，边界见后文。三项 Android SQLite instrumentation 仅编译。服务集成、安全续传及设备生命周期仍未实现或未验收。
 
 ### 2. Signatures
 
@@ -214,3 +214,46 @@ Future<void> pause(String taskId) async {
 错误：把 `EngineCommand.toJson()` 的嵌套 key 原样发送，或将原生 ack 当作已证明业务提交。
 
 正确：显式映射扁平通道字段并保留完整执行身份；Dart 对照 AppStore 实际持久确认，再发送 ack；传输未实现保持明确错误，设备未测保持未验收。
+
+## Android HTTP 私有暂存核心（主机局部通过，尚未接服务）
+
+### 1. Scope / Trigger
+
+适用于 [HttpTransfer](../../../android/app/src/main/kotlin/com/example/downloader/downloader/HttpTransfer.kt) 及其后续原生 Service 调用方。当前仅有测试调用方，通道仍 transferUnavailable；不能将核心测试通过当作可用 AndroidEngine。
+
+### 2. Signatures
+
+`HttpTransfer(appFiles: File).run(key: ExecutionKey, url: String, stop: Stop, onSample: (Sample) -> Unit): Staged`；Sample 含 bytes:Long、total:Long?、monotonicMs:Long。Staged 含 file、bytes、total、effectiveUrl、stop:Stop.Reason?、sha256。`Stop.request(PAUSE|CANCEL)` 只请求停止；`resume()` 明确抛 stateConflict/restartRequired。
+
+### 3. Contracts
+
+- 根目录只能由原生 Context.filesDir 注入，拒绝 Dart 路径授权、根别名与 symlink 暂存目录。随机 UUID facts/part 排他 CREATE_NEW+NOFOLLOW_LINKS；先 force 身份意图再创建 payload，不打开旧 partial，不覆盖现有文件。依赖私有 sandbox 排除恶意同 UID 目录替换，不声称完全 TOCTOU 安全。
+- 默认 HTTPS 校验；HTTP identity、15s连接/30s读取、最多10跳重定向，每跳重新校验无认证 http/https 并检测循环。仅新下载200；已知长度严格验证，未知长度仍发真实累计字节。64KiB流缓冲、增量 SHA-256，周期 force 至多每秒，不重扫全文件。
+- request 返回不是停止屏障；调用方等待 run 真正退出及 force/close 成功，再提交 ExecutionJournal 回执。输出关闭后固定一次终态停止原因，facts 与返回使用同一快照；晚到取消由 Service 的取消优先意图协调。取消目前只停止保留，不代表清理成功。
+- facts 仅为诊断材料，不是持久恢复证明。原生日志联动、目录 fsync/重启归属、安全 Range/prefix/candidate 恢复及受控释放均待实现。staged 只表示完整私有暂存，未发布用户目标。
+
+### 4. Validation & Error Matrix
+
+| 条件 | 当前核心行为 |
+| --- | --- |
+| 非法根/暂存别名或 symlink | 拒绝，不触碰外部已有文件 |
+| 非法跳转、非200、编码/长度异常、短EOF | 异常并保留实际材料，不返回 staged |
+| 读被停止中断 | 等待输入/输出关闭及终态facts保存后返回停止结果 |
+| force/close/消费者回调失败 | 异常，不虚报暂停或暂存成功 |
+| 请求续传 | restartRequired，不打开或修改原件 |
+
+### 5. Good/Base/Bad Cases
+
+- Good：未知长度正文在EOF前持续增字节；实际阻塞读取被跨线程停止，run退出后材料与关闭facts一致。
+- Base：两次新下载分配不同私有文件；完整暂存不等同于用户目录发布。
+- Bad：晚到PAUSE不能让facts记staged而返回PAUSE；CANCEL请求返回不能视作已清理。
+
+### 6. Tests Required
+
+独立 Gradle 编译及JUnit16项（协议5＋HTTP11）、flutter analyze、diff检查通过。[真实Socket测试](../../../android/app/src/test/kotlin/com/example/downloader/downloader/HttpTransferTest.kt)覆盖字节/散列、未知长度、重定向、短EOF、编码/长度异常、真实阻塞停止、symlink与sentinel、连接失败和消费者异常。大长度仅声明4294967419、实际5字节，不是超过4GiB传输证明。Android TLS、连接/响应头阻塞停止、force/close故障、目录fsync/重启恢复及设备矩阵尚未验证；后续服务集成须独立验证。
+
+### 7. Wrong vs Correct
+
+错误：`stop.request(PAUSE); emitPaused()`，或以facts/part存在推断可恢复、已发布。
+
+正确：请求停止 → 等待worker真实退出/关闭 → 按串行用户意图协调终态 → 提交持久执行回执 → 交付；取消另需归属清理，发布另走FileStorage协议。

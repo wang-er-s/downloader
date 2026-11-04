@@ -69,3 +69,23 @@ flutter analyze、flutter test；在 android/ 下运行 ./gradlew :app:testDebug
 - 编辑工具实时返回 Dart clean；本会话没有可调用的独立 LSP diagnostics 工具，`command -v lsp` 未找到，不能称完整 LSP 检查已执行。原生文件未变，复用首轮 Gradle五项JUnit通过、三项Android SQLite instrumentation仅编译的独立检查证据，不重复原生构建。
 - 当前原生错误仅 protocolMismatch/stateConflict/persistenceFailure，transferUnavailable/materialReleaseUnavailable 均真实失败；后续网络、权限、HTTP、超时等传输错误映射尚未实现，不泛化为错误矩阵全部 PASS。原生尚无事件生产者，真实通道、Android SQLite运行、服务/HTTP/安全续传/真实暂停取消/设备生命周期继续 BLOCK；fake 与主机 SQLite 只证明本轮桥接边界。
 - 修改范围仅 android_engine.dart、android_engine_test.dart 和本 implement.md。检查点 manifest34项、protected10项初始全部hash匹配；最终除这三个授权文件外均应保持基线hash。未 stage/commit/push/archive，更未更改 task.json；父代理安排下一轮服务/HTTP及设备验证。
+
+## HTTP/私有暂存核心实施（2026-11-04，局部未验收）
+
+- 仅新增 `HttpTransfer.kt` 与 `HttpTransferTest.kt`，追加本任务 design/implement；未改 Dart/DTO/AppStore/schema、通道、ExecutionJournal、Service/manifest/Gradle、插件/源规范、.pi/docs及任务状态；未 stage/commit/push/archive。父代理继续独立check与Service集成。
+- 真实HTTP GET、默认HTTPS TLS代码路径、identity/超时、逐跳校验/10跳上限/循环检测、64位真实字节及未知total/单调样本、已知长度EOF校验、增量SHA-256、最多每秒force进度、排他私有持久暂存、先force归属意图、停止关闭barrier已实现。失败保留材料与原cause；不能把staged当发布成功。
+- Stop的PAUSE/CANCEL只停止并保留数据，cancel清理未实现；调用方必须等待run终止且提交ExecutionJournal回执后才回应通道。resume明确restartRequired；没有完整恢复日志或安全206，本轮不接通道，transferUnavailable保持。facts为诊断材料而非可信恢复证明，进程重开不自动执行。
+- 最终顺序运行 `cd android && JAVA_HOME='/Applications/Android Studio.app/Contents/jbr/Contents/Home' ./gradlew -Pandroid.builder.sdkDownload=false :app:testDebugUnitTest :app:compileDebugAndroidTestKotlin` 成功，日志 `/tmp/android-engine-http-gradle-final.log`；13项JUnit通过（原5+新增8），Android instrumentation仅编译。`flutter analyze`成功，日志 `/tmp/android-engine-http-analyze.log`；未改Dart，未重复94项Dart测试。`git diff --check`通过，日志 `/tmp/android-engine-http-diff.log`。
+- 新增测试全部真实JVM loopback ServerSocket：精确bytes/散列和独立新文件、未知长度完成前增长/单调时间、相对重定向/循环/11跳/认证及file非法跳转、短EOF保留材料、pause和cancel实际停止、symlink根/目录拒绝及外部sentinel不变、403/真实连接拒绝、停止后检查点消费者失败不报paused/staged。大于4GiB只验证Content-Length=4294967419的64位解析与短EOF（实际5字节），未做真实大文件传输/大偏移续传。
+- 首次在仓库根误执行gradlew得到127；随后Android目录构建发现jdk HttpServer不在Android单元测试编译surface（日志 `/tmp/android-engine-http-gradle.log`），改用真实ServerSocket受控HTTP实现后通过，未改Gradle或依赖。
+- 未测/未实现：真实HTTPS服务/证书矩阵、15s/30s超时持续时间、force/close磁盘故障注入、目录fsync/崩溃恢复归属、恶意同UID并发目录替换、真实Android SQLite/通道/前台生命周期/设备矩阵/目录发布。未安装SDK/更改许可证/启动设备，不勾完整PRD验收。
+
+## HTTP 核心独立检查（2026-11-04，局部 PASS）
+
+- 以 HEAD `56d490f` 和父备份 `android-engine-http-review-cv4dts85/manifest.json` 为基线，检查前591文件 SHA-256 全匹配；读取 check.jsonl 六项、PRD/design/implement，并直接分段读取源设计的 URL、HTTP、恢复、材料与 Android 契约。核对 EngineProtocol、ExecutionJournal.complete 与通道调用链：HttpTransfer 仍只有测试调用方，通道仍 transferUnavailable，未接 Service 或共享业务库。
+- 修复 HttpTransfer 终态竞态：原先 facts 和返回值各读一次可变 stop.reason，晚到停止可能导致记录 staged、结果 PAUSE。现在输出关闭后固定同一终态快照；此边界后的停止需由 Service 协调，不能据 Stop.request 已返回就提交暂停/取消回执。同步本任务 design。
+- 新增3项有独立意义的真实 loopback 回归：服务器扣住 EOF 至双 barrier 结束，150ms 内 run 不完成，然后跨线程 request 与 run 各在3s内退出并核对关闭facts/实际材料；gzip及负数/非法/溢出 Content-Length 在写入前拒绝；chunked 解码后的正文超过声明长度时拒绝 staged、保留材料。后一用例是冲突响应的保守拒绝，不声称能检测 HttpURLConnection 已按固定长度截掉的 HTTP 帧外字节。
+- 独立运行 `cd android && JAVA_HOME='/Applications/Android Studio.app/Contents/jbr/Contents/Home' ./gradlew -Pandroid.builder.sdkDownload=false :app:testDebugUnitTest :app:compileDebugAndroidTestKotlin` 最终 BUILD SUCCESSFUL（7s，97 tasks）；JUnit XML 为协议5 + HTTP11 = 16项，0 failures/errors/skipped。日志 `/tmp/android-engine-http-check-gradle.log`。
+- 顺序运行 `flutter analyze`：No issues found（10.8s），日志 `/tmp/android-engine-http-check-analyze.log`；Dart未改，未重复94项Dart测试。`git diff --check` 通过，日志 `/tmp/android-engine-http-check-diff.log`。未暂存、提交或改任务状态；最终只修改允许的HttpTransfer、其测试和本任务design/implement，保护文件哈希复核匹配。
+- 本轮局部 PASS，无剩余局部阻断；Android完整验收仍 BLOCK。真实设备的 HttpURLConnection/TLS/停止延迟（包括连接及响应头阻塞）、默认TLS证书失败、磁盘force/close故障尚未注入；3项真实Android SQLite测试仅编译，不能计运行通过。当前大长度证据仅 Content-Length=4294967419、实际5字节短EOF，不是真实>4GiB传输。facts仅诊断，目录fsync、重启材料归属和崩溃恢复未实现；私有sandbox排除同UID恶意目录替换，不能称完全TOCTOU安全。
+- 下轮门槛：Service脱离Activity/Dart、串行命令与终态及取消优先协调；等待实际退出/关闭/持久日志再交付回执；安全Range/强验证器/prefix与candidate恢复；归属登记和受控清理；通知/权限/系统时限、禁止自动传输及API29/30/33/35/36设备矩阵。不得直接把此构件接为已验收生产DownloadEngine或勾完整PRD。

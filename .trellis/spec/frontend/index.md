@@ -4,7 +4,7 @@
 
 适用于本仓库 Flutter 应用及各平台适配：Android、macOS、Windows 为必需平台，iOS 为希望一并提供、需验证可行性的平台。采用按功能组织目录、MVVM 职责划分、Repository/Service 分层，Riverpod 负责状态管理与依赖注入。复杂业务按需提取 UseCase。
 
-这是已确认的架构约定；领域/执行 DTO、DownloadEngine 与 FileStorage 接口及 AppStore v1 已实现。PluginEngine 与固定 9.5.9 补丁已接入，桌面日志并发、保留原件的安全恢复和当前 macOS 集成已独立复核；整个插件子任务仍未验收。Android 原生通道、独立日志和 Dart AndroidEngine 桥接已通过局部独立检查，真实 SQLite、服务和完整引擎未验收，边界见 architecture.md 的 Android 检查点。`lib/main.dart` 仍为计数器，Repository、Riverpod、Android 传输、用户目录发布与业务界面尚未实现。
+这是已确认的架构约定；领域/执行 DTO、DownloadEngine 与 FileStorage 接口及 AppStore v1 已实现。PluginEngine 与固定 9.5.9 补丁已接入，桌面日志并发、保留原件的安全恢复和当前 macOS 集成已独立复核；整个插件子任务仍未验收。Android 原生通道、独立日志和 Dart AndroidEngine 桥接已通过局部独立检查；内部 HttpTransfer 新下载/私有暂存核心通过主机真实 HTTP 独立检查，尚未接服务或通道，续传明确拒绝。真实 Android SQLite、服务和完整引擎未验收，边界见 architecture.md。`lib/main.dart` 仍为计数器，Repository、Riverpod、Android 传输服务集成、用户目录发布与业务界面尚未实现。
 
 ## 规范入口
 

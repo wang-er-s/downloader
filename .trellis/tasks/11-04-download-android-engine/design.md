@@ -35,3 +35,13 @@ inspect 无副作用并返回原生当前会话；命令以固定执行键/comma
 ack 先在真实 AppStore 短事务读取并核对完整持久 ReceiptAck，不能把 commitReceipt=false 或调用参数当作提交证明；若现存业务任务的同执行回执版本相同，再非破坏 inspect 核对完整回执内容（缺版本也拒绝）。inspect 让出执行权后再次读取持久确认行和业务任务，对现存同版本完整回执重新比较，防止确认行或同确认行下的业务回执期间被替换。较新业务回执/已移除任务按实际留存确认行重放，绝不删除任务或确认行。材料释放原样交给原生校验，当前 materialReleaseUnavailable 仍传播，Dart 无本地文件释放路径。
 
 平台与解析错误封装为 AndroidEngineException.failure（稳定 DownloadFailure）；仅放行已知结构化 reason，不转发原始 PlatformException 消息、诊断路径或任意 details；业务确认读取异常返回 persistenceFailure。该桥接和 host messenger fake 不证明原生执行成功：服务/HTTP/真实暂停取消、原生事件生产、真实 Android SQLite 与端到端设备验收继续 BLOCK。下一步仍是原生服务、HTTP 安全响应/持久暂存及设备矩阵，不勾完整 PRD 验收。
+
+## HTTP 核心局部检查点（2026-11-04，未接服务）
+
+新增内部 `HttpTransfer(Context.filesDir)` 构件，调用方必须是后续原生服务，绝不使用 Dart stagingLocation 作为根目录。当前 API 接收 File 仅为内部原生/真实 JVM 测试入口；拒绝非 canonical 根、symlink 暂存目录和根别名，依赖 Android 私有 sandbox 排除同权限恶意 native 写入者，不声称抵御同 UID 并发替换目录。随机 UUID 分配 `.facts`/`.part`，CREATE_NEW + NOFOLLOW_LINKS 排他创建，先 force 执行身份/意图，再创建 payload；保留所有原文件，不接受任何已有 partial 路径。facts 是诊断材料，不是 ExecutionJournal 恢复证明；目录项 fsync 与崩溃归属恢复未验收。
+
+使用默认 HttpURLConnection/HTTPS TLS，identity、连接15s/读取30s；每跳重新校验无认证 http/https，拒绝 fragment/非法 port，至多10跳和 visited 检测。只接受初次200；非200、编码、长度和IO错误保留真实 cause 与 material。64位累计、未知total=null，实际写入后发单调时间样本；进度force记录最多每秒，SHA-256仅随写入增量更新，不反复扫描。已知长度EOF不匹配拒绝 staged；output force/close与facts force/close失败均不能返回成功。完整结果只称 staged，绝不称 completed/已发布。
+
+Stop.request(PAUSE/CANCEL)仅请求并disconnect；调用者须等待 run 真正退出，文件关闭及终态facts成功后才能提交回执。取消暂保留材料，不等于取消清理完成；后续Service需串行协调命令、停止与journal回执，并在明确归属释放后才对外完成cancel。网络读被停止中断可形成停止结果，输入close、文件/检查点错误仍传播，不能用finally认证失败检查点。输出关闭后固定一次终态停止原因，facts与返回结果使用同一快照；此边界之后到达的停止请求由后续Service按已完成的暂存结果与取消优先意图协调，不回改既有终态。
+
+续传本轮明确 unsupported：resume() 返回 stateConflict/restartRequired，不打开或修改原件，不发HEAD/Range。完整安全GET/ETag/Content-Range/prefix认证与candidate恢复日志未实现；原生通道继续 transferUnavailable。Service、权限、事件/ExecutionJournal联动、恢复/清理和目标发布留后轮；此构件不得直接接为生产DownloadEngine。
