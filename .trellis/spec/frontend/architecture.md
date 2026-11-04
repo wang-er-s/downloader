@@ -4,7 +4,7 @@
 
 下载管理器页面数量有限，但下载生命周期、任务恢复和文件访问必须独立于页面。采用按功能组织目录、MVVM 式职责划分及 Repository/Service 分层；Riverpod 管理界面状态与依赖，复杂业务按需提取 UseCase。
 
-该分层决策已确认；领域/执行 DTO、DownloadEngine 与 FileStorage 接口及 AppStore v1 已实现，现有 API 与验证范围见[持久化契约](persistence.md)。PluginEngine 与固定插件补丁已接入，桌面局部验证见[插件执行契约](plugin-engine.md)；Controller/Repository、AndroidEngine 和用户文件操作仍待实现。插件子任务尚未完成平台验收，当前 macOS 运行结果不能代表 iOS/Windows/最低版本通过。
+该分层决策已确认；领域/执行 DTO、DownloadEngine 与 FileStorage 接口及 AppStore v1 已实现，现有 API 与验证范围见[持久化契约](persistence.md)。PluginEngine 与固定插件补丁已接入，桌面局部验证见[插件执行契约](plugin-engine.md)；AndroidEngine 的 Dart 桥接已通过主机独立检查，但 Repository、Android 原生传输和用户文件操作仍待实现。插件子任务尚未完成平台验收，当前 macOS 运行结果不能代表 iOS/Windows/最低版本通过。
 
 平台范围为必需支持 Android、macOS、Windows，并争取同步提供 iOS。共享业务接口不能绑定 Android 专用通道或数据库；优先复用跨平台实现，仅在平台边界适配执行、目录和文件打开。iOS 系统托管后台任务例外已获用户确认：关联既有任务并同步状态，不主动重新提交失败或取消任务；用户强制退出按系统取消行为处理。具体跨平台方案见 [设计文档](../../../.agents/specs/download-manager/design.md)，其技术选型仍须通过设计审核及平台验证。
 
@@ -160,3 +160,57 @@ Future<void> pause(String taskId) async {
 - 平台：iOS 私有 resume 安全、原生材料释放/临时文件保护失败及真机生命周期，Windows 实机、最低版本、默认目录/持久授权/系统打开仍待验证；Android/桌面不得自动恢复，iOS 不重复提交。
 - 存储：AppStore v1 与确认行已落库；插件独立执行日志不写业务表，确认必须核对实际业务提交。用户目录发布恢复未实现；提供方不支持安全恢复时报能力错误，不假定所有 URI/文件身份稳定。
 - 依赖与发布：sqlite3 3.5.2、path_provider 2.1.6、固定 9.5.9 path 插件已解析锁定；Riverpod 与目录选择仍待接入。macOS release/iOS 无签名构建仅在临时 host 目标 12/15 编译通过，仓库 10.15/14 仍未验证，Windows 未构建。业务功能铺开前须关闭设计所列安全门槛。
+
+## Android 首轮协议/日志检查点（局部通过，非完整引擎）
+
+### 1. Scope / Trigger
+
+适用于 AndroidEngineChannels、EngineProtocol、ExecutionJournal 及 Dart AndroidEngine 调用方。2026-11-04 协议代码、实际 Kotlin 编译、五项 JVM 测试和 Dart 桥接 94 项测试通过；三项 Android SQLite instrumentation 仅编译。服务/HTTP/设备生命周期仍未实现或未验收。
+
+### 2. Signatures
+
+通道为 `downloader/android_engine` 和 `downloader/android_engine/events`，所有请求含 `protocolVersion=1`。inspect 请求仅版本，返回 `{protocolVersion,ownerSessionId,sequence,receipts}`；当前无事件生产者，sequence=0。命令携带扁平执行键、commandId、ownerSessionId、expectedReceiptVersion；enqueue 额外使用 `input=EngineTask.toJson()`，嵌套 key 必须匹配。ack 使用扁平执行键、receiptVersion 和 releaseResumeRefs。
+
+日志入口：`register(command,session)`、`complete(command,session,checkpoint)`、`inspect()`、`acknowledge(ack)`；独立 `android_execution_v1.db` v1 包含 executions/commands/receipts，不打开 AppStore。
+
+### 3. Contracts
+
+- 进程随机会话和串行队列独立于 Activity；detach 只解除通道，不触发传输。inspect 非破坏。
+- SQLite 写事务原子登记执行身份与 NULL 未知命令结果；complete 原子分配递增回执并保存命令结果。相同 commandId/规范化载荷回放，不同载荷拒绝；NULL 结果不自动重执行。
+- 原生 ack 仅验证已有回执/身份/高水位，当前拒绝全部显式材料释放并保守留历史。Dart AndroidEngine 还需先核对 AppStore 已提交的完整确认和现存同版本业务回执；确认期间重读任务与回执，不能仅信任调用参数。
+- 原生类型验证只接受 Int/Long 计数，拒绝负数、未知版本、控制字符、非法名称及不匹配嵌套 key。材料定位形态校验不等于路径归属授权。
+- 真实 SQLite 事务/版本/磁盘故障尚待设备验证；回滚失败附加到原异常，绝不删库重建。
+
+### Android Dart 桥接补充
+
+- `AndroidEngine.open(store: ...)` 仅在 Android 打开；主机测试通过 `isAndroid` 注入，不改变生产平台判断。MethodChannel/EventChannel 使用固定名称和 `protocolVersion=1`。
+- 命令使用扁平执行键，`enqueue` 保留完整 `input=EngineTask.toJson()`；`enqueue/resume` 接受原生持久命令结果，`pause/cancel` 必须校验回执执行键、状态和版本。
+- 事件在首次业务订阅前按顺序缓冲；只有显式成功 `inspect` 才允许更新会话/序号基线，事件本身不能授权换会话。旧 inspect 的迟到结果不能覆盖较新的同步。
+- `acknowledge` 在发送原生确认前读取真实 AppStore 确认行，并对现存同版本业务回执与非破坏 `inspect` 结果做完整比较；inspect 期间再次读取任务和回执，冲突时不发送确认。原生拒绝材料释放时，业务行保持不变。
+- 主机 messenger fake 与 sqlite3 测试证明桥接边界，不证明 Android 原生 SQLite、服务/HTTP、真实通道或设备验收。
+
+### 4. Validation & Error Matrix
+
+| 条件 | 当前行为 |
+| --- | --- |
+| 未知方法/版本/类型/非法输入 | protocolMismatch |
+| 旧会话、执行键、版本或改 commandId 载荷 | stateConflict，并保留结构化 reason |
+| 传输方法通过解析和会话检查 | stateConflict / transferUnavailable；无伪造网络或暂停成功 |
+| 非空 releaseResumeRefs | stateConflict / materialReleaseUnavailable；不推进水位、不删文件 |
+| SQLite/JSON 失败 | persistenceFailure；保留原生诊断，不伪造空快照 |
+
+### 5. Good/Base/Bad Cases
+
+- Good：已登记且已完成命令以同载荷重放，返回原不可变回执。
+- Base：空 inspect 返回当前会话、0 序号和空集合，不安排网络。
+- Bad：直接转发嵌套 Dart 命令、旧会话或未提交业务确认，不得伪造成已接受传输或可释放材料。
+
+### 6. Tests Required
+
+独立 Gradle `:app:testDebugUnitTest :app:compileDebugAndroidTestKotlin` 通过；五项 JVM 测试含 64 位/null、控制字符及保留名称断言。三项 SQLite 测试覆盖重开/确认、回滚与竞争，但没有连接设备，不能计通过。Dart 桥接独立复核及父代理顺序复跑 flutter analyze 干净、flutter test 94/94（基础48 + 桥接46）；包含真实主机 SQLite 的确认竞争、初始事件和显式重新同步。后续补真实通道/重连、未知原生库版本/磁盘错误、材料释放、服务/HTTP 及 API29/30/33/35/36 生命周期矩阵。
+
+### 7. Wrong vs Correct
+
+错误：把 `EngineCommand.toJson()` 的嵌套 key 原样发送，或将原生 ack 当作已证明业务提交。
+
+正确：显式映射扁平通道字段并保留完整执行身份；Dart 对照 AppStore 实际持久确认，再发送 ack；传输未实现保持明确错误，设备未测保持未验收。
