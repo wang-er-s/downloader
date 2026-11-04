@@ -4,7 +4,7 @@
 
 下载管理器页面数量有限，但下载生命周期、任务恢复和文件访问必须独立于页面。采用按功能组织目录、MVVM 式职责划分及 Repository/Service 分层；Riverpod 管理界面状态与依赖，复杂业务按需提取 UseCase。
 
-该分层决策已确认；领域/执行 DTO、DownloadEngine 与 FileStorage 接口及 AppStore v1 已实现，现有 API 与验证范围见[持久化契约](persistence.md)。下文 Controller/Repository、具体引擎和文件操作仍是后续契约；变更时同步调用方和测试。当前主机 SQLite 测试不代表插件补丁、原生后台或四平台兼容性验证通过。
+该分层决策已确认；领域/执行 DTO、DownloadEngine 与 FileStorage 接口及 AppStore v1 已实现，现有 API 与验证范围见[持久化契约](persistence.md)。PluginEngine 与固定插件补丁已接入，桌面局部验证见[插件执行契约](plugin-engine.md)；Controller/Repository、AndroidEngine 和用户文件操作仍待实现。插件子任务尚未完成平台验收，当前 macOS 运行结果不能代表 iOS/Windows/最低版本通过。
 
 平台范围为必需支持 Android、macOS、Windows，并争取同步提供 iOS。共享业务接口不能绑定 Android 专用通道或数据库；优先复用跨平台实现，仅在平台边界适配执行、目录和文件打开。iOS 系统托管后台任务例外已获用户确认：关联既有任务并同步状态，不主动重新提交失败或取消任务；用户强制退出按系统取消行为处理。具体跨平台方案见 [设计文档](../../../.agents/specs/download-manager/design.md)，其技术选型仍须通过设计审核及平台验证。
 
@@ -156,7 +156,7 @@ Future<void> pause(String taskId) async {
 
 ## 待验证与后续补充
 
-- 引擎：9.5.9 原版存在已知契约缺口，iOS/桌面必须先完成固定版本的有限补丁；原生非破坏读取/确认、失败材料保留、未知总长字节和桌面安全恢复均须故障注入，不能只加 Dart 包装。
-- 平台：最低版本、生命周期、默认目录、持久授权、系统打开和 iOS resume data 的系统行为仍待验证；Android/桌面不得自动恢复，iOS 不重复提交。
-- 存储：AppStore v1、确认行及发布意图镜像已落库，真实 SQLite 测试通过；引擎日志、材料释放和平台发布恢复仍待验证。提供方不支持安全恢复时报明确能力错误，不能假定所有 URI/文件身份稳定。
-- 依赖与发布：sqlite3 3.5.2、path_provider 2.1.6 已解析并锁定；Riverpod、补丁插件与其余依赖仍待接入，四平台 release 尚未构建。业务功能铺开前须通过设计所列最小验证门槛。
+- 引擎：固定 9.5.9 补丁及 PluginEngine 已实现；桌面日志跨 isolate 串行写入、prefix 安全恢复、未知长度字节、确认及故障回归已独立复核，见[插件执行契约](plugin-engine.md)。周期/停止全文件扫描已用固定块有界摘要替代，并独立实测超过 4GiB 的 HTTP 落盘、暂停及内容核验；恢复仍线性认证磁盘 prefix，不能将局部通过视作整个插件子任务验收。
+- 平台：iOS 私有 resume 安全、原生材料释放/临时文件保护失败及真机生命周期，Windows 实机、最低版本、默认目录/持久授权/系统打开仍待验证；Android/桌面不得自动恢复，iOS 不重复提交。
+- 存储：AppStore v1 与确认行已落库；插件独立执行日志不写业务表，确认必须核对实际业务提交。用户目录发布恢复未实现；提供方不支持安全恢复时报能力错误，不假定所有 URI/文件身份稳定。
+- 依赖与发布：sqlite3 3.5.2、path_provider 2.1.6、固定 9.5.9 path 插件已解析锁定；Riverpod 与目录选择仍待接入。macOS release/iOS 无签名构建仅在临时 host 目标 12/15 编译通过，仓库 10.15/14 仍未验证，Windows 未构建。业务功能铺开前须关闭设计所列安全门槛。

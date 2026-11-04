@@ -2,7 +2,7 @@
 
 ## 1. Scope / Trigger
 
-适用于下载领域/引擎 DTO、共享 SQLite v1，以及后续 Repository 对状态与确认的原子对齐。当前已实现契约与存储，尚未实现真实下载、Repository 调度或文件发布。源业务方案见[设计文档](../../../.agents/specs/download-manager/design.md)。
+适用于下载领域/引擎 DTO、共享 SQLite v1，以及后续 Repository 对状态与确认的原子对齐。领域与 AppStore 已实现；PluginEngine 的独立执行日志及桌面局部验证见[插件执行契约](plugin-engine.md)，Repository 调度和用户目录发布仍未实现。源业务方案见[设计文档](../../../.agents/specs/download-manager/design.md)。
 
 实现入口为 [AppStore](../../../lib/shared/data/app_store.dart)、[schema](../../../lib/shared/data/app_store_schema.dart) 和 [领域模型](../../../lib/features/downloads/domain/download_models.dart)。domain 仅依赖 Dart；Flutter、SQLite、插件类型不得泄漏进入领域。
 
@@ -85,7 +85,7 @@ void saveSettings(AppSettings settings);
 - 首次伪造确认不占主键，删除后确认保留且其他所有者不可重用执行；配置删除不影响任务。
 - 同版本不同回执通过 saveTask/commitReceipt 两入口均拒绝；旧确认不覆盖新版本或释放列表；未知版本不覆盖旧值。
 
-当前 macOS 主机已真实加载 SQLite 原生资产；path_provider 测试使用注入的目录解析。四平台 release、真实目录通道/授权、原生后台回执、恢复材料释放与文件发布故障注入仍未验证，不能用 DTO/主机单元测试替代。
+当前 macOS 主机已真实加载 SQLite 原生资产；本文件的 path_provider 单元测试使用注入目录。PluginEngine 已额外运行真实 macOS/SQLite 集成及确认/材料边界回归，见[插件执行契约](plugin-engine.md)。其余平台、目录授权、iOS 私有材料与用户目录发布仍未验收，不能用 DTO/主机测试替代。
 
 ## 7. Wrong vs Correct
 

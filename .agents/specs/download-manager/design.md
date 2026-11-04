@@ -6,7 +6,7 @@
 
 依据：[需求文档](requirements.md)、[需求评审](review.md)、[Flutter 架构规范](../../../.trellis/spec/frontend/architecture.md)。截图仅作为界面与交互参考，不扩展代理、分享、认证资源、视频解析、搜索、批量管理等首期范围。
 
-**状态：用户已批准进入实施；领域契约与 AppStore v1 已实现并通过独立检查，其他业务、下载引擎及插件补丁尚未实现。** 本稿替换原 Android 单平台方案。已落地范围及真实签名见[持久化契约](../../../.trellis/spec/frontend/persistence.md)；其余为后续实施契约，不代表原生构建、故障注入或真机验证通过。
+**状态：用户已批准进入实施；领域契约与 AppStore v1 已通过独立检查，PluginEngine 与固定 9.5.9 补丁已实现并通过桌面局部复核，插件子任务仍为 BLOCK/in_progress。** 本稿替换原 Android 单平台方案。已有接口见[持久化契约](../../../.trellis/spec/frontend/persistence.md)，当前执行行为/证据/平台限制见[插件执行契约](../../../.trellis/spec/frontend/plugin-engine.md)；Repository、AndroidEngine、用户目录发布和业务 UI 尚未实现。
 
 ### 已确认的生命周期差异
 
@@ -21,13 +21,13 @@ iOS 用户主动在多任务界面强制退出会触发系统取消后台传输�
 ### 当前代码与改动范围
 
 - `lib/main.dart` 只有 `MyApp`、`MyHomePage`、`_MyHomePageState`；保留 Flutter 入口和平台工程，替换计数器首页。
-- `test/widget_test.dart` 仍是计数器测试，界面子任务后续替换；已新增领域/DTO 与真实 SQLite 测试，`pubspec.yaml` 精确引入 sqlite3 3.5.2、path_provider 2.1.6。
+- `test/widget_test.dart` 仍是计数器测试，界面子任务后续替换；领域/DTO 与真实 SQLite 基础测试 48 项通过，另有插件并发、真实 HTTP 与 macOS 集成。`pubspec.yaml` 精确引入 sqlite3 3.5.2、path_provider 2.1.6 和显式 path 9.5.9 插件。
 - 四个平台工程均已存在，不能将“工程存在”当成下载能力已经支持。
 - Android 的 `MainActivity.kt` 仍是 FlutterActivity 壳；主 manifest 没有业务网络/服务配置，release 仍使用 debug 签名。
 - `ios/Runner/Info.plist` 是基础配置，需要核对后台会话交付、明文 HTTP 策略、签名及目录授权。
-- macOS 的 DebugProfile/Release entitlements 已启用 sandbox，但没有业务客户端联网和下载目录授权；不能只验证 debug。
+- macOS DebugProfile/Release entitlements 已启用 sandbox 并新增客户端联网；用户下载目录/持久授权仍未实现，不能只验证 debug。
 - `windows/CMakeLists.txt` 保留现有 Flutter 原生资产打包方式，后续核验 SQLite 和插件二进制是否进入 release 包。
-- 不手写 GeneratedPluginRegistrant、generated_plugins 等生成文件；允许 Flutter 工具随真实依赖解析刷新生成产物。本子任务仅自动新增 Windows FFI 列表中的 jni 登记，未改原生权限、服务或构建策略。
+- 不手写 GeneratedPluginRegistrant、generated_plugins 等生成文件；允许 Flutter 随依赖解析刷新产物。插件子任务已把 iOS 部署目标由 13 调至既定 14，但当前 Xcode 不支持该最低目标；临时 macOS12/iOS15 host override 的成功编译不等同于仓库 macOS10.15/iOS14 通过。
 
 ## 架构
 
@@ -75,16 +75,16 @@ flowchart TD
 - 两个适配器共享 ExecutionKey、EngineTask、EngineReceipt 和错误约定；Android 不是整个应用的主架构，也不拥有其他平台的业务数据库。
 - 所有平台先下载到应用持久暂存，再发布到固化的目标目录。不使用不能暂停/恢复的 UriDownloadTask 直接写入用户目录，以免为了目录支持破坏暂停能力。
 - 补丁仅覆盖执行边界的持久读取/确认、恢复材料生命周期、累计字节事件和桌面恢复写入前校验，复用原下载实现。原生回执交付必须在原生层修正，不能仅增加 Dart 外层包装。iOS 系统私有 resume data 的安全行为仍是实体设备验收门槛。
-- 插件子任务将固定源码和补丁纳入 `third_party/background_downloader/`，保留上游许可证、发布归档校验值及补丁差异，使用显式 path 依赖并提交 lockfile。暂不升级 SDK、不另建完整跨平台 HTTP 引擎；当前基础子任务尚未引入下载插件或该目录。
+- 固定源码已纳入 `third_party/background_downloader/`，保留许可证、发布归档 SHA-256 与可重放补丁，显式 path 依赖已解析；不升级 SDK、不另建完整 HTTP 引擎。桌面跨 isolate 日志、保留未提交 tail 的恢复、业务确认及固定块有界检查点摘要已独立复核，超过 4GiB 的实际 HTTP 落盘与暂停核验通过；iOS/Windows/最低版本验收缺口仍在。
 
 ### 依赖与系统基线
 
-本地环境已核对为 Flutter 3.44.8 / Dart 3.12.2，Flutter 当前 Android 默认 compileSdk/targetSdk 为 36。sqlite3 与 path_provider 已完成当前工程依赖解析；其他依赖仍为候选，完整业务依赖树及四平台构建尚未验证。
+本地环境为 Flutter 3.44.8 / Dart 3.12.2，Android 默认 compileSdk/targetSdk 为 36。sqlite3、path_provider 与固定插件均已解析；Riverpod、目录选择等尚待引入。当前 macOS 有真实运行证据，四平台与最低系统版本未验收。
 
 | 依赖 | 候选版本 | 用途 |
 | --- | --- | --- |
 | flutter_riverpod | 3.4.3 | 依赖组装、Notifier、StreamProvider；首期不要求代码生成 |
-| background_downloader | 9.5.9 + 本仓库有限补丁（待实现） | iOS 和桌面下载适配；固定来源，Android 不向此插件提交任务 |
+| background_downloader | 9.5.9 + 本仓库有限补丁（已接入，平台未验收） | iOS 和桌面下载适配；固定来源，Android 不向此插件提交任务 |
 | sqlite3 | 3.5.2（已精确锁定） | 四个平台共享 AppStore；当前 macOS 主机真实 SQLite 测试通过，其他平台原生资产待验证 |
 | path_provider | 2.1.6（已精确锁定） | 应用持久目录及平台下载目录定位；真实平台通道及授权待验证 |
 | file_selector | 1.1.0 | 桌面系统目录选择；不假定它自动解决移动端持久授权或 macOS bookmark |
@@ -112,7 +112,7 @@ lib/
 android/app/src/main/kotlin/com/example/downloader/
   MainActivity.kt                   # 通道与系统结果
   downloader/                       # Service、执行日志、文件发布
-third_party/background_downloader/    # 实施时引入固定上游源码及有限补丁
+third_party/background_downloader/    # 已引入固定 9.5.9 源码及有限补丁
 ```
 
 - 下载和设置是两个主入口；下载页包含下载中/已完成/缓存及数量。failed、paused、waitingRecovery、publishing 仍归下载中，只有完成发布的任务归已完成。
@@ -127,7 +127,7 @@ third_party/background_downloader/    # 实施时引入固定上游源码及有�
 
 ### 1. Scope / Trigger
 
-跨越四个平台、数据库、后台执行和文件系统，必须明确命令确认、状态来源、持久化边界和部分失败。DownloadEngine、FileStorage 的接口及 DTO 已定义，具体适配和 Repository/Controller 仍待实现；AppStore 已有的事务入口见[持久化契约](../../../.trellis/spec/frontend/persistence.md)。
+跨越四个平台、数据库、后台执行和文件系统，必须明确命令确认、状态来源、持久化边界和部分失败。DownloadEngine、FileStorage 接口与 DTO 已定义；PluginEngine 已实现并经桌面局部复核，AndroidEngine、用户目录适配和 Repository/Controller 待实现。已有入口见[持久化契约](../../../.trellis/spec/frontend/persistence.md)与[插件执行契约](../../../.trellis/spec/frontend/plugin-engine.md)。
 
 ### 2. Signatures
 
@@ -488,7 +488,7 @@ DirectoryLocation 的 systemDownloads 在 Android 映射到公共 `Download/Down
 
 初始工程样本为 100 条历史记录、两个活动任务及一个超过 4GiB 的可控大文件，检查 64 位偏移和流式内存占用，不承诺尚未实测的性能指标。实际并发控制先遵循引擎可验证能力，不新增用户并发设置。
 
-当前已执行 flutter analyze（无问题）和 flutter test（48 项通过：27 契约、20 真实 SQLite、1 计数器）；仅证明领域与持久化基础，不代表真实下载已实现。后续分别执行各平台构建及原生/集成测试，平台验收不得用当前主机单元测试替代。
+当前独立复核通过 flutter analyze、48 项基础、34 项定向（摘要 5、真实 HTTP 边界 28、400/400 并发日志 1）及 1 项真实 macOS/SQLite 集成；SIGKILL 后无自动请求、手动 Range 恢复完成且原 tail 不变已有实施证据。周期/停止全文件扫描已改为固定 1MiB 分块摘要链及有界尾部；独立实测落盘并核验 4,315,807,744 字节，测试停止标志至持久暂停回执约 21ms，额外检查点约 15ms，不是 UI/Repository 端到端保证。恢复仍线性读盘认证 prefix，保留旧普通 SHA-256 格式验证。复制中断为文件系统注入，未额外做复制阶段 OS 强杀；iOS/Windows/最低目标仍未验收，完整证据边界见[插件执行契约](../../../.trellis/spec/frontend/plugin-engine.md)。
 
 ### 7. Wrong vs Correct
 
@@ -514,7 +514,7 @@ iOS 重新打开 → 查询系统任务 → 关联与同步 → 不重复提交
 ```text
 引擎持久回执 → 非破坏性读取 → AppStore 同事务保存状态和确认行 → 幂等确认
 未知总长 → 独立累计字节事件 → 大小/速度真实，比例与剩余时间未知
-恢复 GET 校验通过 → 才打开原部分文件追加；否则 restartRequired，保留原数据
+恢复 GET 校验通过 → 才向认证材料追加；存在额外 tail 时先登记意图并复制 prefix 到新材料，保留原件
 校验捕获执行键和期望版本 → 固定命令 → 原生拒绝旧身份，不重绑
 先登记发布操作 → 创建/核验身份 → 复制/不覆盖发布 → 核对结果 → completed
 创建/改名结果不明 → uncertain → 保留材料和处理入口，不重复新建
@@ -553,7 +553,7 @@ iOS 重新打开 → 查询系统任务 → 关联与同步 → 不重复提交
 | P2 Android 执行身份 | 空快照握手、固定 key/commandId/期望版本、拒绝旧身份 | 首次空列表、Activity 重连、旧会话/代次/版本请求 |
 | P2 桌面静默重下 | 明确要求补丁在实际 GET 写入前拒绝不安全恢复 | 返回 200/坏 Range/变化 ETag 时原部分文件不变 |
 
-以上只表示设计契约已修订；补丁、故障注入及真机结论仍未完成。
+上表记录原设计审查要求；领域/AppStore 已通过，插件桌面回执、字节及安全恢复现有局部独立证据。用户目标发布、Android 执行与 iOS/Windows/最低目标仍待实施或平台验收，不能把某一桌面修复视为全表闭环。
 
 ## 调研依据
 
@@ -567,4 +567,4 @@ iOS 重新打开 → 查询系统任务 → 关联与同步 → 不重复提交
 - Android SAF 改名返回 URI 的契约：`https://developer.android.com/reference/android/provider/DocumentsContract#renameDocument(android.content.ContentResolver,android.net.Uri,java.lang.String)`；不能假定旧文档标识总有效。
 - Windows 不覆盖移动能力：`https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexw`；实现不得启用 MOVEFILE_REPLACE_EXISTING，仍需验证目标卷和文件身份恢复。
 
-调研已确认系统机制及部分固定版本源码；基础子任务已完成 sqlite3/path_provider 依赖解析、当前 macOS 主机真实 SQLite 测试与独立检查。原生 release 构建、Windows 实机及移动端真机实验尚未进行，不能把声明支持平台或当前主机测试等同于满足本应用全部安全和恢复契约。
+调研和实施现已覆盖固定归档核验、依赖解析、当前 macOS 的真实 SQLite/下载/恢复及独立复核。macOS release 与 iOS 无签名仅在临时更高 host 目标编译通过，未证明既定 macOS10.15/iOS14；Windows 实机、移动端真机、用户目录发布仍未验收，当前主机结果不等同于四平台全部安全契约成立。
