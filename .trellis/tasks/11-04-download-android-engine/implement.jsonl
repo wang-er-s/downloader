@@ -1,5 +1,6 @@
-{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python3 .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
 {"file": ".trellis/spec/frontend/index.md", "reason": "开发前约定、检查入口和当前未实现状态"}
 {"file": ".trellis/spec/frontend/architecture.md", "reason": "分层、执行身份、回执确认、进度和文件恢复规范"}
 {"file": ".agents/specs/download-manager/requirements.md", "reason": "已确认平台范围及49项功能验收"}
 {"file": ".agents/specs/download-manager/design.md", "reason": "修订后的具体签名、数据模型、安全协议和平台验证门槛"}
+{"file": ".trellis/spec/frontend/persistence.md", "reason": "已有DTO、完整执行身份、业务事务确认与独立原生日志边界"}
+{"file": ".trellis/spec/frontend/plugin-engine.md", "reason": "复用已验证的回执与材料安全断言，避免并发丢写、未提交尾部与错误确认清理；不照搬桌面实现"}

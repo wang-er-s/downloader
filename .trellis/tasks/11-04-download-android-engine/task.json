@@ -3,7 +3,7 @@
   "name": "download-android-engine",
   "title": "Android独立下载执行适配",
   "description": "实现不依赖页面的原生下载服务、会话握手、执行日志及安全续传，终止后不自动传输。",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": null,
   "package": null,
