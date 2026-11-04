@@ -6,7 +6,7 @@
 
 ## Background
 
-父任务：[跨平台下载管理器](../11-04-download-manager/prd.md)。依据[需求](../../../.agents/specs/download-manager/requirements.md) 2.1–2.5、3.2–3.4、5.1–5.6、6.1–6.4、7.1–7.2、8.5 及[设计](../../../.agents/specs/download-manager/design.md)的组件接口、数据模型和回执协议。本任务提供基础能力，不单独宣称这些业务验收已完成。
+父任务：[跨平台下载管理器](../../../11-04-download-manager/prd.md)。依据[需求](../../../../../.agents/specs/download-manager/requirements.md) 2.1–2.5、3.2–3.4、5.1–5.6、6.1–6.4、7.1–7.2、8.5 及[设计](../../../../../.agents/specs/download-manager/design.md)的组件接口、数据模型和回执协议。本任务提供基础能力，不单独宣称这些业务验收已完成。
 
 ## Requirements
 

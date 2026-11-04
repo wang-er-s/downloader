@@ -6,7 +6,7 @@ Android 切后台时按系统能力持续下载；页面销毁或重连不影响
 
 ## Background
 
-依赖 [contracts-store](../11-04-download-contracts-store/prd.md)，不依赖 PluginEngine 实现。覆盖[需求](../../../.agents/specs/download-manager/requirements.md) 1.1、1.3–1.4、2.1–2.3、3.1–3.5、8.1–8.2、8.5；遵守[设计](../../../.agents/specs/download-manager/design.md)的 Android 通道、生命周期和回执约定。
+依赖 [contracts-store](../archive/2026-11/11-04-download-contracts-store/prd.md)，不依赖 PluginEngine 实现。覆盖[需求](../../../.agents/specs/download-manager/requirements.md) 1.1、1.3–1.4、2.1–2.3、3.1–3.5、8.1–8.2、8.5；遵守[设计](../../../.agents/specs/download-manager/design.md)的 Android 通道、生命周期和回执约定。
 
 ## Requirements
 

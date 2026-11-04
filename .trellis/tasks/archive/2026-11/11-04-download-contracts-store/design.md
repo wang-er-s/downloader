@@ -2,7 +2,7 @@
 
 ## 前置与边界
 
-这是首个实施子任务，无其他实施依赖；用户已批准最终规划并激活实施。以[源设计](../../../.agents/specs/download-manager/design.md)的 Signatures、Contracts 和共享 SQLite v1 为准，不再设计第二套模型。
+这是首个实施子任务，无其他实施依赖；用户已批准最终规划并激活实施。以[源设计](../../../../../.agents/specs/download-manager/design.md)的 Signatures、Contracts 和共享 SQLite v1 为准，不再设计第二套模型。
 
 ## 结构
 
@@ -14,7 +14,7 @@
 
 SQLite v1 同源设计：download_tasks、saved_downloads、app_settings、engine_receipt_acks。使用参数绑定、短事务和可测试的持久目录入口；用户目录网络与文件复制不放事务内。确认高水位与业务更新原子提交，确认行不依赖任务外键。尚未发版的 v1 与源设计同步，之后的 schema 变化必须迁移。
 
-实际 API、target_ref 的 version=1 JSON 信封、枚举和错误边界已同步至[持久化契约](../../spec/frontend/persistence.md)。StoreTransaction.commitReceipt 原子提交任务/确认，同版本回执载荷不可变，确认行及保留执行身份在删除后仍生效；回滚失败不得掩盖最初异常。
+实际 API、target_ref 的 version=1 JSON 信封、枚举和错误边界已同步至[持久化契约](../../../../spec/frontend/persistence.md)。StoreTransaction.commitReceipt 原子提交任务/确认，同版本回执载荷不可变，确认行及保留执行身份在删除后仍生效；回滚失败不得掩盖最初异常。
 
 ## 失败与兼容
 

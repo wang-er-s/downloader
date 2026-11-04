@@ -49,7 +49,7 @@
 
 按以下任务边界交付，依赖及执行顺序在 implement.md 记录：
 
-1. [领域契约与共享持久化](../11-04-download-contracts-store/prd.md)。
+1. [领域契约与共享持久化](../archive/2026-11/11-04-download-contracts-store/prd.md)（已验收并归档；仅领域与存储基础）。
 2. [iOS/桌面下载引擎安全补丁](../11-04-download-plugin-engine/prd.md)。
 3. [Android 独立执行适配](../11-04-download-android-engine/prd.md)。
 4. [跨平台目录与文件发布恢复](../11-04-download-file-storage/prd.md)。

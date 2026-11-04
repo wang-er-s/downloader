@@ -30,6 +30,6 @@
 - 依赖解析：sqlite3 3.8.0 的 hooks/record_use 要求 meta ^1.19.0，与 Flutter 3.44.8 固定 meta 1.18.0 冲突；实际精确解析 sqlite3 3.5.2、path_provider 2.1.6，通过，无 SDK 升级或 dependency_overrides。
 - Flutter 工具自动在 windows/flutter/generated_plugins.cmake 的 FFI 列表添加 jni 一行；已获父代理批准保留。来源 path_provider_android 2.3.1 → jni 1.1.2 / jni_flutter 1.0.4+1，不手写生成文件。
 - 独立检查实际运行 dart format、flutter analyze、flutter test --reporter expanded、git diff --check，均通过；未暂存/提交/归档。
-- 源设计、frontend/index.md、architecture.md 已按实现状态同步，并新增 [持久化契约](../../spec/frontend/persistence.md) 的七节 API/数据/错误/测试约束。
+- 源设计、frontend/index.md、architecture.md 已按实现状态同步，并新增 [持久化契约](../../../../spec/frontend/persistence.md) 的七节 API/数据/错误/测试约束。
 - 未验证：四平台 release/实机、真实 path_provider 通道与目录授权、后台下载、材料归属释放、文件发布恢复；尚无已发版旧 schema，未宣称历史迁移已验证。
-- 用户已于 2026-11-04 批准两笔提交及后续直接提交/推进的授权；本子任务实现与独立检查通过，完成工作提交后归档，再按依赖启动 plugin-engine。当前记录不代表其余平台能力已验收。
+- 用户已于 2026-11-04 批准两笔提交及后续直接提交/推进的授权；工作提交为 e58df05（规范/规划）、1edb779（领域/存储）。本子任务已通过实现与独立检查并归档，按依赖继续 plugin-engine；不代表其余平台能力已验收。

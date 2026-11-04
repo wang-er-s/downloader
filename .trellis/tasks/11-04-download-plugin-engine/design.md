@@ -2,7 +2,7 @@
 
 ## 前置
 
-依赖 [contracts-store](../11-04-download-contracts-store/prd.md) 的模型/接口和事务边界；不依赖 Android 引擎或 UI。源协议均见[设计](../../../.agents/specs/download-manager/design.md)，禁止另造任务事实来源。
+依赖 [contracts-store](../archive/2026-11/11-04-download-contracts-store/prd.md) 的模型/接口和事务边界；不依赖 Android 引擎或 UI。源协议均见[设计](../../../.agents/specs/download-manager/design.md)，禁止另造任务事实来源。
 
 ## 固定来源与补丁
 
