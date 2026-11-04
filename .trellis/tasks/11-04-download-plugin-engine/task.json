@@ -3,7 +3,7 @@
   "name": "download-plugin-engine",
   "title": "iOS与桌面下载引擎安全补丁",
   "description": "固定background_downloader 9.5.9，补齐持久回执、材料生命周期、未知总长字节和桌面安全续传，验证iOS系统恢复行为。",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": null,
   "package": null,
