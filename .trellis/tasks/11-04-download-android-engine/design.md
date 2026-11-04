@@ -103,3 +103,15 @@ A–E源码局部通过。实际startService/startForeground抛错时同步撤�
 本轮检查点结果：v5只新增候选事实表（recovery_candidate_files预登记双文件、candidate_checkpoints冻结source与恢复command关联），不重写v4源材料门，也不选择候选作为公开current branch。ResumeTransfer区分真实Stopped与不安全资源，candidate周期双force/final双close证据可支撑下一内部core继续；公开worker接受/跨session退休/停止回执补存仍未闭合，保持resume拒绝。63项主机JVM和15项SQLite仅编译不改变平台BLOCK。
 
 独立前置复核：70项JVM（协议5＋HTTP20＋协调器15＋生命周期7＋恢复23）、静态分析和debug APK通过，15项SQLite仅编译。Stopped不能遮蔽真实FILE关闭/NETWORK断连失败；final双close及proof回调后重读Stop，late CANCEL不proof/staged；等待头部和prefix复制后的断连停止用确定latch验证。内部Stopped.bytes仅诊断，不是下载增量或认证偏移。v5仅局部PASS，公开resume原目标未交付。下一轮需同时交付原子acceptResume冻结源版本N与新worker版本N+1、当前进程显式授权/旧授权退休、Coordinator真实恢复worker、stop/receipt/终态补存和确定current branch，不再以额外helper替代生产接线验收。
+
+## 公开恢复生产接线（本轮v6设计）
+
+acceptResume在同一事务核对真实Runtime session、完整命令/head/最新generation、原生input与非取消/非publishing状态，冻结选中branch的完整源proof和历史版本；queued回执和新worker授权与接受结果同时提交。v6用resume_sources冻结每个worker的source JSON及root ref，active_branches显式保存同执行当前已认证branch，retired_workers独立记录旧session授权退休，finished字段不伪造。Coordinator确认当前进程该执行无Work才调用接受；inspect/open不退休不调度。
+
+复用同一Work/ServiceLifecycle/两worker池；enqueue运行HttpTransfer、resume运行ResumeTransfer。恢复工厂复用v5真实GET/candidate回调及文件门，另提供绑定新worker/head的validator，不放宽原v4内部工厂。candidate双force/双close后更新active branch，旧材料保留；停止、receipt、terminalSavePending与原worker统一。初始Stopped只用于停止事实，不使用诊断bytes。终态回执从已认证branch诚实提供resumeRef；publishing/cancelling不授予继续。
+
+## v6 独立复核结论（2026-11-04）
+
+公开 resume 生产源码局部 PASS；provider 502/EOF 中断后的恢复检查完成正式报告，不把中断当作通过或源码失败。审查修复持久 PAUSE/CANCEL 与迟到 staged 竞争：staged 事务重验持久 stop 并转 Stopped；持久 CANCEL 不认证新 proof。历史 finished worker 重放使用原 receipt 的派生恢复字段，仍精确比较完整非派生 checkpoint/worker/pause result，避免新 active branch 污染旧终态幂等。
+
+Coordinator 真实 socket/file/core 回归已覆盖公开 pause→resume→再 pause/resume、prefix/copy 各 PAUSE/CANCEL、关闭/认证提交失败及持久 cancel 竞争。独立80项 JVM（5+20+25+7+23）、静态分析与 debug APK 通过；Dart 未改沿用前轮独立102项，18项 SQLite instrumentation 仅编译。完整任务保持 BLOCK/in_progress、PRD 不勾选；设备 SQLite/Service/权限/强杀重开与 API 矩阵、受控清理/发布、fsync及真实大文件仍待验证。下一步先闭合持久取消意图、所有归属材料的可重放受控释放与停止后清理，再进入 file-storage；不删除未知孤儿，不凭路径或普通 ack 授予删除。

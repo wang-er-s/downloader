@@ -22,6 +22,10 @@ internal class TransferCoordinator(
 
         fun transfer(command: NativeCommand): HttpTransfer
 
+        fun acceptResume(command: NativeCommand): Pair<Map<String, Any?>, Boolean> = conflict("restartRequired")
+
+        fun recovery(command: NativeCommand): ResumeTransfer = conflict("restartRequired")
+
         fun stop(
             worker: NativeCommand,
             command: NativeCommand,
@@ -52,6 +56,7 @@ internal class TransferCoordinator(
         var sampleAt = 0L
         var intent: String? = null
         var failureCode: String? = null
+        var failureReason: String? = null
         var pause: NativeCommand? = null
         var cancel: NativeCommand? = null
         var pauseResult: CompletableFuture<Map<String, Any?>>? = null
@@ -77,7 +82,8 @@ internal class TransferCoordinator(
         queue.execute {
             try {
                 if (command.ownerSessionId != session) conflict("staleSession")
-                if (command.method == "resume") conflict("restartRequired")
+                // Resume acceptance itself atomically registers the immutable command.
+                // Existing Work prevents another same-execution worker, including pending saves.
                 if (command.method == "enqueue" &&
                     work.keys.any { it.taskId == command.key.taskId && it != command.key }
                 ) {
@@ -87,7 +93,7 @@ internal class TransferCoordinator(
                 if (retained?.saveFailure == true) {
                     val original =
                         when (command.method) {
-                            "enqueue" -> retained.command
+                            "enqueue", "resume" -> retained.command
                             "cancel" -> retained.cancel
                             else -> retained.pause
                         }
@@ -114,7 +120,25 @@ internal class TransferCoordinator(
                     if (command.method == "pause") completePause(result, receipt) else result.complete(receipt)
                     return@execute
                 }
-                val replay = journal.register(command)
+                val resumeAcceptance =
+                    if (command.method == "resume") {
+                        if (retained != null) {
+                            // Replays may read their stored result; a different command cannot authorize work.
+                            if (command.commandId != retained.command.commandId) conflict("transferUnavailable")
+                            val replay = journal.register(command) ?: conflict("transferUnavailable")
+                            result.complete(replay)
+                            return@execute
+                        }
+                        journal.acceptResume(command)
+                    } else {
+                        null
+                    }
+                val replay =
+                    if (resumeAcceptance != null) {
+                        if (resumeAcceptance.second) resumeAcceptance.first else null
+                    } else {
+                        journal.register(command)
+                    }
                 if (replay != null) {
                     if (command.method == "cancel") throw EngineProtocolException("cleanupFailure", "materialReleaseUnavailable")
                     if (command.method == "pause" && replay["state"] != "paused") {
@@ -122,9 +146,11 @@ internal class TransferCoordinator(
                         throw EngineProtocolException(failure?.get("code") as? String ?: "stateConflict", "transferUnavailable")
                     }
                     result.complete(replay)
-                } else if (command.method == "enqueue") {
-                    val accepted = journal.accept(command)
+                } else if (command.method == "enqueue" || command.method == "resume") {
+                    val accepted = resumeAcceptance?.first ?: journal.accept(command)
                     val item = Work(command, result)
+                    item.bytes = (accepted["downloadedBytes"] as? Number)?.toLong() ?: 0
+                    item.total = (accepted["totalBytes"] as? Number)?.toLong()
                     work[command.key] = item
                     emit(accepted)
                     val token = lifecycle.issue(item.stop)
@@ -214,7 +240,8 @@ internal class TransferCoordinator(
             if (work.values.count { it.active } >= 2) break
             if (work[item.command.key] !== item || item.active || item.terminal != null || !item.ready || item.intent != null) continue
             try {
-                val transfer = journal.transfer(item.command)
+                val transfer = if (item.command.method == "enqueue") journal.transfer(item.command) else null
+                val recovery = if (item.command.method == "resume") journal.recovery(item.command) else null
                 emit(journal.receipt(item.command, checkpoint(item, "running")))
                 val authorized =
                     lifecycle.worker(item.token) {
@@ -222,11 +249,7 @@ internal class TransferCoordinator(
                         workers.execute {
                             try {
                                 val staged =
-                                    transfer.run(
-                                        item.command.key,
-                                        EngineProtocol.string(EngineProtocol.map(item.command.payload["input"]), "url"),
-                                        item.stop,
-                                    ) { sample ->
+                                    runTransfer(item, transfer, recovery) { sample ->
                                         // Backpressure bounds the queue and propagates persistence failure into run.
                                         val saved = CompletableFuture<Unit>()
                                         queue.execute {
@@ -275,10 +298,12 @@ internal class TransferCoordinator(
             item.total = staged.total
         }
         if (error is HttpTransfer.Failure) item.bytes = error.bytes
+        val realError = if (error is ResumeTransfer.Stopped && item.stop.reason != null) null else error
+        if (realError is EngineProtocolException) item.failureReason = realError.reason
         val state =
             when {
                 item.intent == "cancel" -> "cancelling"
-                error != null || item.failureCode != null -> "failed"
+                realError != null || item.failureCode != null -> "failed"
                 item.intent == "pause" -> "paused"
                 else -> "publishing"
             }
@@ -286,7 +311,7 @@ internal class TransferCoordinator(
             when {
                 item.intent == "cancel" -> "cleanupFailure"
                 item.failureCode != null -> item.failureCode
-                error != null -> failureCode(error)
+                realError != null -> failureCode(realError)
                 else -> null
             }
         val location = if (state == "publishing") staged?.file?.path else null
@@ -338,7 +363,25 @@ internal class TransferCoordinator(
         return receipt
     }
 
+    private fun runTransfer(
+        item: Work,
+        transfer: HttpTransfer?,
+        recovery: ResumeTransfer?,
+        sample: (HttpTransfer.Sample) -> Unit,
+    ): HttpTransfer.Staged =
+        if (recovery != null) {
+            recovery.run(item.stop, onSample = sample)
+        } else {
+            transfer!!.run(
+                item.command.key,
+                EngineProtocol.string(EngineProtocol.map(item.command.payload["input"]), "url"),
+                item.stop,
+                sample,
+            )
+        }
+
     private fun failureCode(error: Exception): String {
+        if (error is EngineProtocolException) return error.code
         if (error is HttpTransfer.Failure) return error.code
         if (error is HttpTransfer.StageFailure) return error.code
         var cause: Throwable? = error
@@ -371,7 +414,7 @@ internal class TransferCoordinator(
                     "code" to it,
                     "message" to "原生执行停止，材料已保留",
                     "taskId" to item.command.key.taskId,
-                    "details" to null,
+                    "details" to item.failureReason?.let { reason -> mapOf("reason" to reason) },
                 )
             },
     )

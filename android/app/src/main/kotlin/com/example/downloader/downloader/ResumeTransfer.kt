@@ -12,7 +12,7 @@ import java.nio.file.StandardOpenOption.WRITE
 import java.security.MessageDigest
 import java.util.UUID
 
-/** Internal explicit recovery core. Not reachable from public resume until coordinator authorization closes. */
+/** Verified recovery core; production callers supply a frozen native source and live worker authorization. */
 internal class ResumeTransfer(
     private val root: File,
     private val material: NativeResumeMaterial,
@@ -23,6 +23,8 @@ internal class ResumeTransfer(
     private val disconnect: (HttpURLConnection) -> Unit = { it.disconnect() },
     private val onCheckpoint: (String, ForcedMaterial) -> Unit = { _, _ -> },
     private val monotonicNanos: () -> Long = System::nanoTime,
+    private val verifiedPrefix: (Long) -> Unit = {},
+    private val copiedPrefix: (Long) -> Unit = {},
 ) {
     /** Before a complete candidate prefix exists, stop is a real interruption, not unsafe HTTP.
      * bytes is diagnostic copied/source position only: neither task download progress nor a forced proof.
@@ -101,8 +103,8 @@ internal class ResumeTransfer(
     fun run(
         stop: HttpTransfer.Stop = HttpTransfer.Stop(),
         onSample: (HttpTransfer.Sample) -> Unit = {},
-        onCopied: (Long) -> Unit = {},
-        onVerified: (Long) -> Unit = {},
+        onCopied: (Long) -> Unit = copiedPrefix,
+        onVerified: (Long) -> Unit = verifiedPrefix,
     ): HttpTransfer.Staged {
         if (!used.compareAndSet(false, true)) conflict("commandOutcomeUnknown")
         val source = material.forced

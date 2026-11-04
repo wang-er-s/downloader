@@ -10,7 +10,7 @@ import org.json.JSONObject
 internal class ExecutionJournal(
     context: Context,
     name: String = "android_execution_v1.db",
-) : SQLiteOpenHelper(context.applicationContext, name, null, 5) {
+) : SQLiteOpenHelper(context.applicationContext, name, null, 6) {
     private val privateRoot = context.applicationContext.filesDir.canonicalFile
 
     override fun onConfigure(db: SQLiteDatabase) {
@@ -30,6 +30,7 @@ internal class ExecutionJournal(
         createWorkers(db)
         createResume(db)
         createCandidateProofs(db)
+        createResumeWorkers(db)
     }
 
     override fun onUpgrade(
@@ -39,13 +40,26 @@ internal class ExecutionJournal(
     ) {
         // SQLiteOpenHelper wraps this migration and user_version update in one transaction.
         // Never rewrite the v1 tables or discard an old database on failure.
-        if (oldVersion !in 1..4 || newVersion != 5) {
+        if (oldVersion !in 1..5 || newVersion != 6) {
             throw EngineProtocolException("protocolMismatch", "journalVersion")
         }
         if (oldVersion == 1) createMaterials(db)
         if (oldVersion <= 2) createWorkers(db)
         if (oldVersion <= 3) createResume(db)
-        createCandidateProofs(db)
+        if (oldVersion <= 4) createCandidateProofs(db)
+        createResumeWorkers(db)
+    }
+
+    private fun createResumeWorkers(db: SQLiteDatabase) {
+        db.execSQL(
+            "CREATE TABLE resume_sources (command_id TEXT PRIMARY KEY NOT NULL REFERENCES worker_authorizations(command_id), root_ref TEXT NOT NULL REFERENCES resume_checkpoints(ref), snapshot TEXT NOT NULL)",
+        )
+        db.execSQL(
+            "CREATE TABLE active_branches (engine TEXT NOT NULL, generation INTEGER NOT NULL, root_ref TEXT NOT NULL REFERENCES resume_checkpoints(ref), snapshot TEXT NOT NULL, PRIMARY KEY(engine,generation), FOREIGN KEY(engine,generation) REFERENCES executions(engine,generation))",
+        )
+        db.execSQL(
+            "CREATE TABLE retired_workers (command_id TEXT PRIMARY KEY NOT NULL REFERENCES worker_authorizations(command_id), retired_by TEXT NOT NULL REFERENCES commands(id), reason TEXT NOT NULL)",
+        )
     }
 
     private fun createCandidateProofs(db: SQLiteDatabase) {
@@ -275,7 +289,223 @@ internal class ExecutionJournal(
                 }
         }
 
-    /** Internal only. Public resume remains gated in Coordinator, no startup caller invokes this. */
+    private fun encodeMaterial(value: NativeResumeMaterial): String =
+        encode(
+            mapOf(
+                "ref" to value.ref,
+                "command" to value.commandId,
+                "version" to value.receiptVersion,
+                "task" to value.forced.key.taskId,
+                "engine" to value.forced.key.engineId,
+                "generation" to value.forced.key.generation,
+                "source" to value.forced.source.path,
+                "offset" to value.forced.offset,
+                "total" to value.forced.total,
+                "url" to value.forced.effectiveUrl,
+                "etag" to value.forced.etag,
+                "digest" to value.forced.prefixDigest,
+                "algorithm" to value.forced.algorithm,
+            ),
+        )
+
+    private fun decodeMaterial(text: String): NativeResumeMaterial {
+        val m = decode(text)
+        return NativeResumeMaterial(
+            m["ref"] as String,
+            m["command"] as String,
+            (m["version"] as Number).toLong(),
+            ForcedMaterial(
+                ExecutionKey(m["task"] as String, m["engine"] as String, (m["generation"] as Number).toLong()),
+                java.io.File(m["source"] as String),
+                (m["offset"] as Number).toLong(),
+                (m["total"] as? Number)?.toLong(),
+                m["url"] as String,
+                m["etag"] as String,
+                m["digest"] as String,
+                m["algorithm"] as String,
+            ),
+        )
+    }
+
+    private fun currentBranch(
+        db: SQLiteDatabase,
+        key: ExecutionKey,
+    ): Pair<String, NativeResumeMaterial>? {
+        db
+            .rawQuery(
+                "SELECT root_ref,snapshot FROM active_branches WHERE engine=? AND generation=?",
+                arrayOf(key.engineId, key.generation.toString()),
+            ).use {
+                if (it.moveToFirst()) return it.getString(0) to decodeMaterial(it.getString(1))
+            }
+        return inspectResume(key)?.let { it.ref to it }
+    }
+
+    /** Called only by Coordinator after proving no current-process Work for this execution. */
+    fun acceptResume(
+        command: NativeCommand,
+        session: String,
+    ): Pair<Map<String, Any?>, Boolean> =
+        transaction { db ->
+            val captured = EngineProtocol.command(command.method, decode(encode(command.payload)))
+            if (captured.method != "resume" || captured.ownerSessionId != session) conflict("staleSession")
+            if (captured.key != command.key || captured.commandId != command.commandId || captured.ownerSessionId != command.ownerSessionId ||
+                captured.expectedReceiptVersion != command.expectedReceiptVersion
+            ) {
+                conflict("commandPayloadChanged")
+            }
+            val encoded = encode(mapOf("method" to captured.method, "arguments" to captured.payload))
+            db.rawQuery("SELECT payload,result FROM commands WHERE id=?", arrayOf(captured.commandId)).use {
+                if (it.moveToFirst()) {
+                    if (it.getString(0) != encoded) conflict("commandPayloadChanged")
+                    if (it.isNull(1)) conflict("commandOutcomeUnknown")
+                    return@transaction decode(it.getString(1)) to true
+                }
+            }
+            val current = execution(db, captured.key) ?: conflict("staleExecution")
+            if (current.first != captured.expectedReceiptVersion) conflict("staleReceipt")
+            db.rawQuery("SELECT MAX(generation) FROM executions WHERE task=?", arrayOf(captured.key.taskId)).use {
+                it.moveToFirst()
+                if (it.getLong(0) != captured.key.generation) conflict("staleExecution")
+            }
+            val latest =
+                db
+                    .rawQuery(
+                        "SELECT payload FROM receipts WHERE engine=? AND generation=? AND version=?",
+                        arrayOf(captured.key.engineId, captured.key.generation.toString(), current.first.toString()),
+                    ).use {
+                        if (!it.moveToFirst()) conflict("restartRequired")
+                        decode(it.getString(0))
+                    }
+            if (latest["state"] in listOf("cancelling", "cancelled", "publishing", "completed")) conflict("restartRequired")
+            val (rootRef, source) = currentBranch(db, captured.key) ?: conflict("restartRequired")
+            val f = source.forced
+            val original = inspectResume(captured.key) ?: conflict("restartRequired")
+            if (original.ref != rootRef) conflict("materialOwnership")
+            if (source.ref == rootRef) {
+                if (source != original) conflict("restartRequired")
+            } else {
+                val candidate = inspectCandidate(captured.key, source.commandId) ?: conflict("restartRequired")
+                if (source.ref != "candidate:${candidate.operationId}" || candidate.forced != source.forced ||
+                    candidate.receiptVersion != source.receiptVersion
+                ) {
+                    conflict("materialOwnership")
+                }
+            }
+            if (f.key != captured.key || source.receiptVersion > current.first || f.offset <= 0 || (f.total != null && f.offset >= f.total) ||
+                !NativeMaterialPaths.strongEtag(f.etag) || f.algorithm != NativePrefixDigest.ALGORITHM
+            ) {
+                conflict("restartRequired")
+            }
+            NativeMaterialPaths.validate(privateRoot, f.source)
+            if (f.source.length() < f.offset) conflict("restartRequired")
+            // The input is native-owned and remains immutable throughout all workers of this key.
+            db
+                .rawQuery(
+                    "SELECT input FROM executions WHERE engine=? AND generation=?",
+                    arrayOf(captured.key.engineId, captured.key.generation.toString()),
+                ).use {
+                    if (!it.moveToFirst() ||
+                        EngineProtocol
+                            .string(
+                                EngineProtocol.map(EngineProtocol.map(decode(it.getString(0))["arguments"])["input"]),
+                                "url",
+                            ).isBlank()
+                    ) {
+                        conflict("restartRequired")
+                    }
+                }
+            val retiring = mutableListOf<String>()
+            db
+                .rawQuery(
+                    "SELECT w.command_id,w.session,w.stop,w.finished FROM worker_authorizations w LEFT JOIN retired_workers r ON r.command_id=w.command_id WHERE w.engine=? AND w.generation=? AND r.command_id IS NULL",
+                    arrayOf(captured.key.engineId, captured.key.generation.toString()),
+                ).use {
+                    while (it.moveToNext()) {
+                        if (it.getString(2) == "cancel") conflict("restartRequired")
+                        if (it.getInt(3) == 0) {
+                            if (it.getString(1) == session) conflict("transferUnavailable")
+                            retiring.add(it.getString(0))
+                        }
+                    }
+                }
+            db.execSQL("INSERT INTO commands(id,payload) VALUES(?,?)", arrayOf(captured.commandId, encoded))
+            for (old in retiring) {
+                db.execSQL(
+                    "INSERT INTO retired_workers(command_id,retired_by,reason) VALUES(?,?,'waitingRecovery')",
+                    arrayOf(old, captured.commandId),
+                )
+            }
+            val receipt =
+                complete(
+                    captured,
+                    session,
+                    NativeCheckpoint("queued", f.offset, f.total, resumeSupport = "supported", resumeRef = source.ref),
+                )
+            db.execSQL(
+                "INSERT INTO worker_authorizations(command_id,session,engine,generation,version) VALUES(?,?,?,?,?)",
+                arrayOf<Any>(captured.commandId, session, captured.key.engineId, captured.key.generation, receipt["receiptVersion"]!!),
+            )
+            db.execSQL(
+                "INSERT INTO resume_sources(command_id,root_ref,snapshot) VALUES(?,?,?)",
+                arrayOf(captured.commandId, rootRef, encodeMaterial(source)),
+            )
+            receipt to false
+        }
+
+    /** A new worker uses its own head version and an immutable historical source snapshot. */
+    fun newResumeTransfer(
+        command: NativeCommand,
+        session: String,
+        allocation: (() -> Unit) -> Unit,
+    ): ResumeTransfer {
+        val captured = EngineProtocol.command(command.method, decode(encode(command.payload)))
+        if (captured.method != "resume" || captured.ownerSessionId != session) conflict("staleSession")
+        if (captured.key != command.key || captured.commandId != command.commandId || captured.ownerSessionId != command.ownerSessionId ||
+            captured.expectedReceiptVersion != command.expectedReceiptVersion
+        ) {
+            conflict("commandPayloadChanged")
+        }
+        val frozen =
+            readableDatabase.rawQuery("SELECT root_ref,snapshot FROM resume_sources WHERE command_id=?", arrayOf(captured.commandId)).use {
+                if (!it.moveToFirst()) conflict("restartRequired")
+                it.getString(0) to it.getString(1)
+            }
+        val material = decodeMaterial(frozen.second)
+
+        fun validate(db: SQLiteDatabase) {
+            workerStop(db, captured, session)
+            val original = inspectResume(captured.key) ?: conflict("restartRequired")
+            if (original.ref != frozen.first) conflict("materialOwnership")
+            if (material.ref == frozen.first) {
+                if (original != material) conflict("restartRequired")
+            } else {
+                val candidate = inspectCandidate(captured.key, material.commandId) ?: conflict("restartRequired")
+                if (material.ref != "candidate:${candidate.operationId}" || material.forced != candidate.forced ||
+                    material.receiptVersion != candidate.receiptVersion
+                ) {
+                    conflict("materialOwnership")
+                }
+            }
+            db.rawQuery("SELECT root_ref,snapshot FROM resume_sources WHERE command_id=?", arrayOf(captured.commandId)).use {
+                if (!it.moveToFirst() || it.getString(0) != frozen.first || it.getString(1) != frozen.second ||
+                    material.forced.key != captured.key
+                ) {
+                    conflict("restartRequired")
+                }
+            }
+        }
+        transaction { db ->
+            validate(db)
+            db.rawQuery("SELECT command_id FROM recovery_attempts WHERE command_id=?", arrayOf(captured.commandId)).use {
+                if (it.moveToFirst()) conflict("commandOutcomeUnknown")
+            }
+        }
+        // All callbacks use the same serial log queue as progress/user stop/terminal commits.
+        return recoveryTransfer(captured, material, frozen.first, { db -> validate(db) }, true, allocation)
+    }
+
+    /** Original v4 internal factory retains all original source/head gates. */
     fun newRecovery(
         command: NativeCommand,
         session: String,
@@ -328,9 +558,38 @@ internal class ExecutionJournal(
                 if (it.moveToFirst()) conflict("commandOutcomeUnknown")
             }
         }
+        return recoveryTransfer(captured, material, ref, ::validate)
+    }
+
+    private fun recoveryTransfer(
+        captured: NativeCommand,
+        material: NativeResumeMaterial,
+        ref: String,
+        validate: (SQLiteDatabase) -> Unit,
+        promote: Boolean = false,
+        allocation: (() -> Unit) -> Unit = { it() },
+    ): ResumeTransfer {
+        fun save(action: (SQLiteDatabase) -> Unit) {
+            allocation { transaction(action) }
+        }
         return ResumeTransfer(privateRoot, material, { id, candidate ->
-            transaction { db ->
+            save { db ->
                 validate(db)
+                if (promote) {
+                    workerStop(db, captured, captured.ownerSessionId)?.let { stop ->
+                        throw ResumeTransfer.Stopped(
+                            if (stop ==
+                                "cancel"
+                            ) {
+                                HttpTransfer.Stop.Reason.CANCEL
+                            } else {
+                                HttpTransfer.Stop.Reason.PAUSE
+                            },
+                            null,
+                            material.forced.offset,
+                        )
+                    }
+                }
                 NativeMaterialPaths.validate(privateRoot, candidate, false)
                 if (candidate.name != "$id.part") conflict("materialOwnership")
                 db
@@ -354,8 +613,14 @@ internal class ExecutionJournal(
                 db.execSQL("UPDATE recovery_attempts SET phase='candidate' WHERE command_id=?", arrayOf(captured.commandId))
             }
         }, { id ->
-            transaction { db ->
+            save { db ->
                 validate(db)
+                if (promote) workerStop(db, captured, captured.ownerSessionId)?.let { stop ->
+                    throw ResumeTransfer.Stopped(
+                        if (stop == "cancel") HttpTransfer.Stop.Reason.CANCEL else HttpTransfer.Stop.Reason.PAUSE,
+                        null, material.forced.offset,
+                    )
+                }
                 db
                     .rawQuery(
                         "SELECT phase FROM recovery_operations WHERE id=? AND resume_command=? AND source_ref=?",
@@ -366,16 +631,32 @@ internal class ExecutionJournal(
                 db.execSQL("UPDATE recovery_operations SET phase='staged' WHERE id=?", arrayOf(id))
             }
         }, {
-            transaction { db ->
+            save { db ->
                 validate(db)
+                if (promote) {
+                    workerStop(db, captured, captured.ownerSessionId)?.let { stop ->
+                        throw ResumeTransfer.Stopped(
+                            if (stop ==
+                                "cancel"
+                            ) {
+                                HttpTransfer.Stop.Reason.CANCEL
+                            } else {
+                                HttpTransfer.Stop.Reason.PAUSE
+                            },
+                            null,
+                            material.forced.offset,
+                        )
+                    }
+                }
                 db.execSQL(
                     "INSERT INTO recovery_attempts(command_id,source_ref,phase) VALUES(?,?,'requested')",
                     arrayOf(captured.commandId, ref),
                 )
             }
         }, onCheckpoint = { id, forced ->
-            transaction { db ->
+            save { db ->
                 validate(db)
+                if (promote && workerStop(db, captured, captured.ownerSessionId) == "cancel") conflict("stateConflict")
                 if (forced.key != captured.key || forced.offset < material.forced.offset || forced.total == null ||
                     forced.offset > forced.total ||
                     forced.total.let { material.forced.total != null && it != material.forced.total } ||
@@ -427,7 +708,7 @@ internal class ExecutionJournal(
                             captured.commandId,
                             ref,
                             material.receiptVersion,
-                            captured.expectedReceiptVersion,
+                            if (promote) execution(db, captured.key)!!.first else captured.expectedReceiptVersion,
                             forced.offset,
                             forced.total,
                             forced.effectiveUrl,
@@ -439,8 +720,21 @@ internal class ExecutionJournal(
                     )
                 } else {
                     db.execSQL(
-                        "UPDATE candidate_checkpoints SET offset=?,digest=? WHERE operation_id=?",
-                        arrayOf<Any>(forced.offset, forced.prefixDigest, id),
+                        "UPDATE candidate_checkpoints SET offset=?,digest=?,receipt_version=? WHERE operation_id=?",
+                        arrayOf<Any>(
+                            forced.offset,
+                            forced.prefixDigest,
+                            if (promote) execution(db, captured.key)!!.first else captured.expectedReceiptVersion,
+                            id,
+                        ),
+                    )
+                }
+                if (promote) {
+                    val version = execution(db, captured.key)!!.first
+                    val branch = NativeResumeMaterial("candidate:$id", captured.commandId, version, forced)
+                    db.execSQL(
+                        "INSERT OR REPLACE INTO active_branches(engine,generation,root_ref,snapshot) VALUES(?,?,?,?)",
+                        arrayOf<Any>(captured.key.engineId, captured.key.generation, ref, encodeMaterial(branch)),
                     )
                 }
             }
@@ -645,8 +939,11 @@ internal class ExecutionJournal(
         command: NativeCommand,
         session: String,
     ): String? {
-        if (command.method != "enqueue" || command.ownerSessionId != session) conflict("staleSession")
+        if (command.method !in setOf("enqueue", "resume") || command.ownerSessionId != session) conflict("staleSession")
         val current = execution(db, command.key) ?: conflict("staleExecution")
+        db.rawQuery("SELECT command_id FROM retired_workers WHERE command_id=?", arrayOf(command.commandId)).use {
+            if (it.moveToFirst()) conflict("staleSession")
+        }
         val payload = encode(mapOf("method" to command.method, "arguments" to command.payload))
         db.rawQuery("SELECT payload,result FROM commands WHERE id=?", arrayOf(command.commandId)).use {
             if (!it.moveToFirst() || it.getString(0) != payload) conflict("commandPayloadChanged")
@@ -700,6 +997,18 @@ internal class ExecutionJournal(
             receipt
         }
 
+    private fun recoverableCheckpoint(
+        db: SQLiteDatabase,
+        command: NativeCommand,
+        checkpoint: NativeCheckpoint,
+    ): NativeCheckpoint {
+        if (checkpoint.state in setOf("publishing", "cancelling") || checkpoint.error?.get("code") == "stateConflict") return checkpoint
+        val proof = currentBranch(db, command.key)?.second ?: return checkpoint
+        val f = proof.forced
+        if (f.total != null && f.offset >= f.total) return checkpoint
+        return checkpoint.copy(resumeSupport = "supported", resumeRef = proof.ref)
+    }
+
     /** Appends a worker fact without changing the immutable enqueue result. */
     fun workerReceipt(
         command: NativeCommand,
@@ -714,7 +1023,7 @@ internal class ExecutionJournal(
             if (stop == "pause" && checkpoint.state !in setOf("paused", "failed")) conflict("stateConflict")
             if (current.first == Long.MAX_VALUE) conflict("receiptVersionExhausted")
             val version = current.first + 1
-            val receipt = checkpoint.receipt(command.key, version)
+            val receipt = recoverableCheckpoint(db, command, checkpoint).receipt(command.key, version)
             db.execSQL(
                 "INSERT INTO receipts(engine,generation,version,payload) VALUES(?,?,?,?)",
                 arrayOf<Any>(command.key.engineId, command.key.generation, version, encode(receipt)),
@@ -746,7 +1055,7 @@ internal class ExecutionJournal(
             // A commit can succeed while its caller loses the result. Retry only the exact
             // stopped checkpoint, never grant another worker or allocate another version.
             val encodedCommand = encode(mapOf("method" to command.method, "arguments" to command.payload))
-            if (command.ownerSessionId != session || command.method != "enqueue") conflict("staleSession")
+            if (command.ownerSessionId != session || command.method !in setOf("enqueue", "resume")) conflict("staleSession")
             db.rawQuery("SELECT payload,result FROM commands WHERE id=?", arrayOf(command.commandId)).use {
                 if (!it.moveToFirst() || it.getString(0) != encodedCommand) conflict("commandPayloadChanged")
                 if (it.isNull(1)) conflict("commandOutcomeUnknown")
@@ -763,14 +1072,20 @@ internal class ExecutionJournal(
                 }
             if (finishedVersion != null) {
                 execution(db, command.key) ?: conflict("staleExecution")
-                val expected = checkpoint.receipt(command.key, finishedVersion!!)
-                db
-                    .rawQuery(
-                        "SELECT payload FROM receipts WHERE engine=? AND generation=? AND version=?",
-                        arrayOf(command.key.engineId, command.key.generation.toString(), finishedVersion.toString()),
-                    ).use {
-                        if (!it.moveToFirst() || it.getString(0) != encode(expected)) conflict("receiptPayload")
-                    }
+                val stored = db.rawQuery(
+                    "SELECT payload FROM receipts WHERE engine=? AND generation=? AND version=?",
+                    arrayOf(command.key.engineId, command.key.generation.toString(), finishedVersion.toString()),
+                ).use {
+                    if (!it.moveToFirst()) conflict("receiptPayload")
+                    decode(it.getString(0))
+                }
+                // Recovery fields were derived by the original terminal transaction. A later
+                // worker may advance active_branches; replay must use this receipt's frozen facts.
+                val expected = checkpoint.copy(
+                    resumeSupport = stored["resumeSupport"] as String,
+                    resumeRef = stored["resumeRef"] as String?,
+                ).receipt(command.key, finishedVersion!!)
+                if (encode(stored) != encode(expected)) conflict("receiptPayload")
                 if (pause != null) {
                     if (pause.method != "pause" || pause.key != command.key || pause.ownerSessionId != session) conflict("staleExecution")
                     val encoded = encode(mapOf("method" to pause.method, "arguments" to pause.payload))

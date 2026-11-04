@@ -78,6 +78,26 @@ internal object AndroidEngineRuntime {
                             done.get()
                         }
 
+                    override fun acceptResume(command: NativeCommand) = log.acceptResume(command, ownerSessionId)
+
+                    override fun recovery(command: NativeCommand) =
+                        log.newResumeTransfer(command, ownerSessionId) { action ->
+                            val done = java.util.concurrent.CompletableFuture<Unit>()
+                            executor.execute {
+                                try {
+                                    action()
+                                    done.complete(Unit)
+                                } catch (error: Exception) {
+                                    done.completeExceptionally(error)
+                                }
+                            }
+                            try {
+                                done.get()
+                            } catch (error: java.util.concurrent.ExecutionException) {
+                                throw (error.cause as? Exception ?: error)
+                            }
+                        }
+
                     override fun stop(
                         worker: NativeCommand,
                         command: NativeCommand,
