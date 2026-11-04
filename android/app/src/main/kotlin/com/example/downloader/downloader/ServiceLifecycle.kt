@@ -45,6 +45,31 @@ internal class ServiceLifecycle {
         return true
     }
 
+    /** Every delivered system start owes promotion, independently of download capabilities.
+     * Promotion never issues a grant. Even revoked/unknown tokens must discharge that obligation.
+     */
+    @Synchronized fun deliver(
+        token: String?,
+        instance: String,
+        promote: () -> Unit,
+        authorize: () -> Unit,
+    ): Boolean {
+        try {
+            promote()
+        } catch (error: Exception) {
+            val grant = grants[token]
+            if (grant?.instance == null) {
+                grants.remove(token)?.stop?.request(HttpTransfer.Stop.Reason.PAUSE)
+            } else if (grant.instance == instance) {
+                // Keep the claimed grant until destroy can report all affected workers.
+                grant.stop.request(HttpTransfer.Stop.Reason.PAUSE)
+            }
+            // A stale instance must not revoke a capability already owned elsewhere.
+            throw error
+        }
+        return foreground(token, instance, authorize)
+    }
+
     @Synchronized fun foreground(
         token: String?,
         instance: String,
@@ -119,6 +144,10 @@ internal class ServiceLifecycle {
         action(instance)
         return true
     }
+
+    /** A delayed failure from an old instance cannot fail another instance before ready. */
+    @Synchronized fun acceptsFailure(token: String?, instance: String): Boolean =
+        grants[token]?.instance.let { it == null || it == instance }
 
     @Synchronized fun unclaimed(token: String?): Boolean = grants[token]?.claimed == false
 

@@ -35,13 +35,8 @@ class DownloadService : Service() {
         val token = intent?.getStringExtra("token")
         try {
             val started =
-                AndroidEngineRuntime.lifecycle.foreground(token, instance) {
+                AndroidEngineRuntime.lifecycle.deliver(token, instance, promote = {
                     if (Build.VERSION.SDK_INT < 26) throw IllegalStateException("foregroundServiceUnsupported")
-                    if (Build.VERSION.SDK_INT >= 33 &&
-                        checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-                    ) {
-                        throw SecurityException("notificationPermissionRequired")
-                    }
                     val manager = getSystemService(NotificationManager::class.java)
                     manager.createNotificationChannel(NotificationChannel("downloads", "下载传输", NotificationManager.IMPORTANCE_LOW))
                     val open =
@@ -65,7 +60,13 @@ class DownloadService : Service() {
                     } else {
                         startForeground(7601, notification)
                     }
-                }
+                }, authorize = {
+                    if (Build.VERSION.SDK_INT >= 33 &&
+                        checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+                    ) {
+                        throw SecurityException("notificationPermissionRequired")
+                    }
+                })
             if (!started) AndroidEngineRuntime.lifecycle.stopUnowned(instance) { stopSelf(startId) }
             AndroidEngineRuntime.executor.execute {
                 val coordinator = AndroidEngineRuntime.coordinator(applicationContext)
@@ -79,10 +80,16 @@ class DownloadService : Service() {
                 AndroidEngineRuntime.stopIdle()
             }
         } catch (error: Exception) {
-            // The foreground grant was already revoked; do not wait for SQLite to stop an idle instance.
-            AndroidEngineRuntime.stopIdle()
+            android.util.Log.e("AndroidEngine", "Service foreground delivery failed; no worker authorized", error)
+            // A genuine platform failure is never retried. Retire this instance and
+            // signal its existing workers too (a repeated start can fail promotion).
+            val failToken = AndroidEngineRuntime.lifecycle.acceptsFailure(token, instance)
+            val owned = AndroidEngineRuntime.lifecycle.destroy(instance) { stopSelf() }
+            AndroidEngineRuntime.lifecycle.stopUnowned(instance) { stopSelf(startId) }
             AndroidEngineRuntime.executor.execute {
-                if (token != null) AndroidEngineRuntime.coordinator(applicationContext).launchFailed(token, error)
+                val coordinator = AndroidEngineRuntime.coordinator(applicationContext)
+                if (token != null && failToken) coordinator.launchFailed(token, error)
+                coordinator.restrict(if (error is SecurityException) "permissionDenied" else "backgroundRestricted", owned)
                 AndroidEngineRuntime.stopIdle()
             }
         }

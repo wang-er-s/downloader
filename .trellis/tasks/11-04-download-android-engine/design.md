@@ -134,3 +134,25 @@ v7 新增 cancel_cleanups 与 cancel_cleanup_members，保留 v1–v6 所有行�
 生产授权门未改变：无worker的旧head命令仍先staleReceipt，取消checkpoint不从branch推导恢复能力；夹具分别改为现有门的精确错误并核对无副作用、显式传入Coordinator同款unsupported。网络sample没有固定read长度，测试达到8192/16384预定累计值才暂停，仍精确检查原offset及完整恢复断言。
 
 emulator-5554 API37最终实际执行20项Android SQLite，XML为20/0失败/0错误/0跳过，v1-v7迁移、回滚、归属和清理均在真实Android SQLite上执行。证据/tmp/android-sqlite-runtime-final.log（Gradle退出0）、final-results.xml；真实失败second/third日志与XML保留。完整API29/30/33/35/36真机矩阵、Service/通道及其他PRD边界仍BLOCK，不能因API37模拟器局部PASS勾选完整验收。详见implement末节。
+
+## API37 真实 Runtime/Service 检查点（2026-11-04）
+
+设备夹具从前台 MainActivity 发起生产 Runtime.coordinator.command，经既有 ServiceLifecycle、主线程 startForegroundService、DownloadService.startForeground/serviceReady 和真实双 worker/SQLite执行；不调用直接core.run冒充服务，不新增生产观察接口、权限或导出组件。现有runner增加显式runtimeMode选择，默认20项SQLite及逐case异常归属保持。外部Python HTTP服务经adb reverse运行，跨应用force-stop存活，以请求日志核对206与重开零GET。
+
+真实通知revoke暴露API37错误：DownloadService拒绝通知权限后stopSelf，系统因FGS尚未startForeground立即使进程崩溃。Runtime在lifecycle.pending内、实际startForegroundService前检查已有通知权限并抛SecurityException；现有pending立即撤权、launchFailed持久失败路径保持，Service内复查保留。无需申请新权限或降低target。原失败XML/logcat保留，修复后denied设备case正常完成且零GET。
+
+同一API37模拟器已完成：真实foreground服务/字节增长、Activity finish/重开不停止、pause持久回执、实际206继续、cancel停止并清理登记原件和候选双文件；外部force-stop时dumpsys确认foreground=true/type=dataSync/target36，重开新session仅inspect无新增GET。三个完成case各1/0/0/0；seedKill是故意被强杀的准备阶段，不计通过case。完整MethodChannel消息编解码、API29/30/33/35/36真机、系统timeout/重启、TLS/磁盘故障、大文件/用户目录发布仍BLOCK。命令、证据及残余见implement末节。
+
+## FGS 已接受请求与下载授权分离（本轮 P1 方案）
+
+核对本机 `sdk/sources/android-36.1/android/app/Service.java` startForeground 文档（FOREGROUND_SERVICE/dataSync 类型权限与后台限制）及 Android 官方 notification-permission 文档：应用不需要 POST_NOTIFICATIONS 即可启动 FGS，但仍必须提供通知；通知拒绝时 FGS 通知出现在 Task Manager。通知权限在此是产品传输策略，不是系统 promotion 前置。
+
+最小实现为每次真实 onStartCommand 先调用 startForeground（包含空/旧/已撤销 token），再在同一 Lifecycle 边界独立校验 token/实例并检查传输通知策略。promotion 不产生/恢复 grant、ready 或 worker；每个 callback 都履行义务，不按 token 是否存活跳过，也不靠预查缩窗。合法但通知已拒绝的 grant 被撤销，以 permissionDenied 持久失败；已 PAUSE/CANCEL 的 token 不复活。实例退休/其他 owner 拒绝绑定，旧 callback 仅按 startId 停止未归属实例，旧 idle epoch 不能停新 grant。重复 callback 可合法重复 promotion，不能重复 worker；不引入持久启动调度或自动重试。
+
+真实 notification/startForeground 异常记录原始 native 日志，立即撤销该 token，排队保存稳定 permissionDenied/backgroundRestricted；未归属实例按 startId 停止，已有 owner 由 epoch idle 清理。平台真正拒绝 promotion 时不能伪造履约成功，明确保留平台失败边界。无新权限/组件/SDK/日志 schema 改动。
+
+回归以生产 Lifecycle deliver 入口覆盖 accepted→PAUSE/CANCEL→callback、accepted→permissionDenied→callback、空/旧 token、旧实例/多 start/idle 和 promotion 抛错。设备优先用 instrumentation 主线程同步：在单个主线程 action 中真实 startForegroundService 返回后、释放 callback 前，协调队列完成 pause/cancel；权限交错若系统 revoke 会杀进程则不以 fake 权限冒充设备交错，单独验证 denied 下真实 promotion 契约与零 worker，并标记证据边界。
+
+本轮落实补充（恢复后最终状态）：Service 的每次 delivery 均先真实 promotion，再独立校验下载 token 和通知策略。promotion 抛错时立即发布所属 Stop；Service 退休该实例并将所属 token 集合交 Coordinator 保存稳定错误，旧实例的失败不能撤销另一实例已持有的 grant。通知策略拒绝也退休当前实例，不以恢复授权完成 promotion。Runtime 只新增默认 null 的内部 instrumentation barrier，在实际 start 请求返回且 lifecycle monitor 已释放之后执行；无导出组件或外部调用入口。
+
+API37 上已通过真实确定性交错：系统已接受→主线程 callback 前持久 PAUSE/CANCEL；系统已接受→callback 前通过 Android 明确的 CTS/local-test `revokePostNotificationPermissionWithoutKillForTest` 撤销实际通知权限。后者仅在 instrumentation 临时采用 shell 身份，权限判断仍为生产 checkSelfPermission，未更改 hidden-api 策略、manifest 或应用权限。三者零新 HTTP/零材料，通知变化持久 failed/permissionDenied；真实 denied 下无 token 的系统启动也合法 promotion 后停止。旧实例、多 start、旧 idle 及平台 promotion 抛错仍是源码/JVM证据，不扩大为完整平台验收。最终证据见 implement 最新段。

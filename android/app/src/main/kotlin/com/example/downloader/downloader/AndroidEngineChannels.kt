@@ -19,6 +19,10 @@ internal object AndroidEngineRuntime {
     val lifecycle = ServiceLifecycle()
     private val services = mutableMapOf<String, DownloadService>()
 
+    // Internal instrumentation barrier; null in production. Runs outside the lifecycle monitor,
+    // after the actual system request returned and before the main looper can deliver callbacks.
+    internal var afterServiceStartAccepted: ((String) -> Unit)? = null
+
     fun attachService(
         id: String,
         service: DownloadService,
@@ -123,11 +127,21 @@ internal object AndroidEngineRuntime {
                 { token ->
                     main.post {
                         try {
-                            lifecycle.pending(token) {
+                            val requested = lifecycle.pending(token) {
+                                // Product policy: denied notifications prevent transmission.
+                                // This preflight is not the system's promotion permission check.
+                                if (android.os.Build.VERSION.SDK_INT >= 33 &&
+                                    app.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) !=
+                                    android.content.pm.PackageManager.PERMISSION_GRANTED
+                                ) {
+                                    throw SecurityException("notificationPermissionRequired")
+                                }
                                 val intent = android.content.Intent(app, DownloadService::class.java).putExtra("token", token)
                                 if (android.os.Build.VERSION.SDK_INT >= 26) app.startForegroundService(intent) else app.startService(intent)
                             }
+                            if (requested) afterServiceStartAccepted?.invoke(token)
                         } catch (error: Exception) {
+                            Log.e("AndroidEngine", "Service start request failed; no retry", error)
                             executor.execute {
                                 coordinator(app).launchFailed(token, error)
                             }

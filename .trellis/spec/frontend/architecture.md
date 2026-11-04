@@ -165,7 +165,7 @@ Future<void> pause(String taskId) async {
 
 ### 1. Scope / Trigger
 
-适用于 AndroidEngine、原生通道、Service/Coordinator、传输/恢复核心及 OwnedMaterialCleanup 的命令、执行和清理边界。2026-11-04 v7 显式取消生产源码独立局部 PASS：88项 JVM、flutter analyze 和 debug APK 构建通过；Dart 未改，沿用前轮独立102项。20项 Android SQLite instrumentation 已在 API37 模拟器 emulator-5554 独立实跑，20/0失败/0错误/0跳过；真实 Service/通道及 API29/30/33/35/36 真机矩阵仍 BLOCK，完整任务不得勾选或归档。
+适用于 AndroidEngine、原生通道、Service/Coordinator、传输/恢复核心及 OwnedMaterialCleanup 的命令、执行和清理边界。v7 生产源码及 FGS 启动后撤权修复已独立局部 PASS：93项 JVM、flutter analyze 和 debug APK 构建通过；Dart 未改，沿用前轮独立102项。API37 模拟器 emulator-5554 已独立实跑20项 SQLite及7项 Runtime/Service用例，均零失败/错误/跳过。Runtime用例绕过 MethodChannel 编解码；完整通道、API29/30/33/35/36真机及完整PRD仍 BLOCK，不得勾选或归档。
 
 ### 2. Signatures
 
@@ -173,7 +173,7 @@ Future<void> pause(String taskId) async {
 - enqueue/pause/resume/cancel 携带扁平 taskId/engineId/generation、commandId、ownerSessionId、expectedReceiptVersion；enqueue 另传 `input=EngineTask.toJson()`，嵌套 key 必须匹配。ack 为扁平执行键、receiptVersion、releaseResumeRefs。不会把内部嵌套命令 JSON 原样当通道命令。
 - 日志入口：`register(command,session)`、`acceptWorker(command,session)`、`acceptResume(command,session)`、`newTransfer(command,session,allocation)`、`newResumeTransfer(command,session,allocation): ResumeTransfer`、`registerMaterials(command,session,payload,facts)`、`saveResumeCheckpoint(command,session,forced)`、`inspectResume(key)`、`newRecovery(command,session,ref): ResumeTransfer`、`inspectCandidate(key,resumeCommandId)`、`inspectRecoveries(key)`、`inspectMaterials(key)`、`workerReceipt(command,session,checkpoint,finished)`、`stopWorker(worker,command,session,checkpoint)`、`finishWorker(command,session,checkpoint,pause)`、`inspect()`、`acknowledge(ack)`；既有 `complete` 保留旧命令路径。公开 resume 经 acceptResume/newResumeTransfer；newRecovery 保留旧内部 pending 路径及其严格源版本门。
 - 独立 `android_execution_v1.db` 的 user_version=7；保留 v1–v6 历史，新增 cancel_cleanups、cancel_cleanup_members，不打开共享 AppStore。`beginCancel(command,session,worker?,checkpoint?)` 原子登记意图；`finishCancel(command,session)` 仅在停止及终态保存后清理并提交结果。
-- ServiceLifecycle：`issue(stop)`、`pending(token,action)`、`foreground(token,instance,action)`、`ready(token,instance)`、`worker(token,action)`、`revoke(token)`、`idle()`、`stop(ticket,action)`、`destroy(instance,action)`；token 和实例归属只在当前进程有效，不从数据库重建调度。
+- ServiceLifecycle：`issue(stop)`、`pending(token,action)`、`deliver(token,instance,promote,authorize)`、`foreground(token,instance,action)`、`acceptsFailure(token,instance)`、`ready(token,instance)`、`worker(token,action)`、`revoke(token)`、`idle()`、`stop(ticket,action)`、`destroy(instance,action)`；token 和实例归属只在当前进程有效，不从数据库重建调度。
 - `HttpTransfer(appFiles: File, authorizedUrl: String? = null, onCheckpoint: (ForcedMaterial) -> Unit = {}, onAllocation: (ExecutionKey,File,File) -> Unit).run(key,url,stop,onSample): Staged`；Sample 为 bytes:Long、total:Long?、monotonicMs:Long，Staged 为 file、bytes、total、effectiveUrl、stop、sha256。`Stop.request(PAUSE|CANCEL)` 只发布停止请求。生产 newTransfer 注入检查点持久回调；`ResumeTransfer.run(stop,onSample,onCopied): Staged` 只由内部固定材料工厂构建，测试故障注入不改变默认真实关闭/断连。
 
 ### 3. Contracts
@@ -210,9 +210,11 @@ Future<void> pause(String taskId) async {
 
 - 生产链为 Dart AndroidEngine → 通道 → 进程串行 Coordinator → 当前进程 token → DownloadService → 最多两个 HttpTransfer/ResumeTransfer worker → SQLite → EngineEvent；同执行最多一个 worker。只有显式本进程 enqueue/resume 可调度；inspect、重连、进程启动、空/旧/重复 Intent 和未知结果不得创建网络请求。
 - Manifest 声明 INTERNET、FOREGROUND_SERVICE、FOREGROUND_SERVICE_DATA_SYNC、POST_NOTIFICATIONS；Service exported=false、foregroundServiceType=dataSync、START_NOT_STICKY，无 boot receiver、WorkManager 或自动网络重试。按需求允许明文 HTTP，HTTPS 保持默认证书验证。API<26 拒绝服务；候选最低 API29 未因本轮修改。
-- Runtime 与 Service 共用同一 ServiceLifecycle；token、实例、ready、idle epoch 在短同步临界区核验，实际 startService/startForeground、worker 提交和 idle stopSelf 按同一归属执行。启动动作抛错立即同步撤销 grant，不等待日志队列；失败前台启动立即安排 epoch 约束的 idle 停止。
-- 新 enqueue 使旧 idle 票据失效；destroy/timeout 只失效所属实例 grant，并先发布所属 worker 停止标志，后排日志保存。退休实例不绑定新授权且给出明确失败，不自动重新调度。timeout 整体退休所属实例时无参 stopSelf()；无效/重复 Intent 只按 startId 停止不属于当前 owner 的实例，不误停有效新请求。
-- 生命周期锁内不访问 SQLite、不等待 Future 或网络退出。标准启动/通知/停止 IPC 的设备延迟尚未验证；不能以短临界区假设替代平台证据。
+- Runtime 与 Service 共用同一 ServiceLifecycle；token、实例、ready、idle epoch 在短同步临界区核验。pending 只决定是否请求系统启动，失败同步撤销 grant。系统接受 startForegroundService 后，即使 token 被 PAUSE/CANCEL 撤销，每次交付仍由 deliver 先实际 startForeground，再由 foreground 校验下载授权；promotion 本身不创建 grant、ready 或 worker，空/旧/重复 Intent 不联网。
+- POST_NOTIFICATIONS 不是 Android 系统启动 FGS 的前置条件，仍须提供通知。产品策略在 Runtime 请求前及 Service promotion 后检查权限：拒绝时阻止传输并保存 permissionDenied。不得在已接受的启动交付中因通知拒绝或 token 撤销而跳过 promotion、直接 stopSelf，否则可能触发 ForegroundServiceDidNotStartInTimeException。
+- promotion 失败立即发所属 Stop，未 claim 的 grant 移除，已 claim 的保留至 destroy 汇总；不影响另一实例的 grant。Service catch 在 destroy 前调用 acceptsFailure 核对当前 token 的实例归属，只有允许时才 launchFailed；restrict 仅使用 destroy 返回的 owned 集合，旧实例失败不得撤销新实例已 claim、尚未 ready 的授权。实际平台拒绝不自动重试，也不保证免于系统终止。
+- 新 enqueue 使旧 idle 票据失效；destroy/timeout 只失效所属实例 grant，并先发布所属 worker 停止标志，后排日志保存。退休实例不绑定新授权。timeout 整体退休所属实例时无参 stopSelf()；无效/重复 Intent 只按 startId 停止不属于当前 owner 的实例，不误停有效新请求。
+- 生命周期锁内不访问 SQLite、不等待 Future 或网络退出。API37 已验证指定启动交错，但标准 IPC 的最坏延迟和其他 API/系统限制仍未验收；不能以短临界区假设替代平台证据。
 - Stop 原子优先级 CANCEL>PAUSE；disconnect 在独立 daemon 池执行且不持 Stop/Lifecycle 锁，attach 后重查 stop。系统停止标志不排在可能阻塞的日志队列后；用户 pause/cancel 仍先持久意图再发信号。标志可见不保证平台 connect/headers/read 立即退出。
 - pause Future 必须等真实 run 退出、payload/facts force/close 和终态提交后才成功，失败 pause 重放仍失败。cancel 必须再完成归属清理和完成结果提交；中间 cancelling 接受回执不代表成功，更不代表业务任务已移除。ready 前已停止的 enqueue Future 也必须确定结束。
 - running/进度/终态持久后才 emit，sequence 会话内递增，事件消费者异常不能回滚已持久操作。完整私有暂存只到 publishing，未完成目标发布不能 completed。
@@ -249,7 +251,7 @@ Future<void> pause(String taskId) async {
 | 网络断开/超时、写入/force/close、日志失败 | networkUnavailable/timeout、fileWriteFailure、persistenceFailure；不虚报暂停成功 |
 | 内部恢复缺/弱/变化 ETag、旧 proof/worker 版本、坏 prefix/Range、200/416/redirect | restartRequired 或对应 stateConflict；不创建 candidate，不覆盖原件、不从零重发 |
 | 恢复复制/EOF/force/close/候选登记失败 | 保留原件、旧 proof 与已登记 candidate；不认证内部 staged 或用户完成 |
-| 通知权限拒绝、后台启动受限、系统 timeout/destroy | permissionDenied 或 backgroundRestricted 等稳定失败；先停止授权、再保存受影响任务，保留材料；通知请求 UI 未实现 |
+| 通知权限拒绝、后台启动受限、系统 timeout/destroy | permissionDenied 或 backgroundRestricted；已接受的启动先履行 promotion，再拒绝下载授权；失败只停止/保存所属任务且不重试，通知请求 UI 未实现 |
 | 取消归属冲突、删除/完成保存失败 | stateConflict 或 cleanupFailure；不虚报清理完成，保留可重放意图和诊断 |
 | 普通/旧 ack 或非空 releaseResumeRefs | 普通确认不删材料；非空引用仍 materialReleaseUnavailable |
 | 公开 resume 无安全 proof/强 ETag、known total 且 offset==total | stateConflict/restartRequired；不从零请求、不自动发布 |
@@ -264,7 +266,7 @@ Future<void> pause(String taskId) async {
 
 ### 6. Tests Required
 
-独立 Gradle `:app:testDebugUnitTest :app:compileDebugAndroidTestKotlin :app:assembleDebug` 正常退出、debug APK 构建成功；88项 JVM（协议5＋HTTP20＋Coordinator30＋Lifecycle7＋Resume23＋Cleanup3）零失败/错误/跳过，flutter analyze 干净。Dart 未改，沿用前轮独立102/102。本轮日志 `/tmp/android-cleanup-check-gradle-final3.log`、`/tmp/android-cleanup-check-analyze.log`；审查进程超时前已完成正式报告，父代理核对保存结果，不将超时本身当验收。
+独立 Gradle `:app:testDebugUnitTest :app:connectedDebugAndroidTest :app:assembleDebug` 退出0，debug APK成功；93项 JVM（协议5＋HTTP20＋Coordinator30＋Lifecycle12＋Resume23＋Cleanup3）实际执行，零失败/错误/跳过，flutter analyze 退出0且干净。Dart 未改，沿用前轮独立102/102。证据 `/tmp/android-fgs-race-independent-gradle.log`、`/tmp/android-fgs-race-independent-jvm/`、`/tmp/android-fgs-race-independent-analyze.log`；历史失败/中断不计通过。
 
 - 生产 Lifecycle/Stop/Coordinator 确定性回调/latch：旧 idle/new enqueue/旧 destroy、新旧实例、启动失败立即撤权、foreground/ready 间失效、同实例多个 start 的 timeout、阻塞断连与取消优先。
 - 真实 loopback HTTP/文件：最多两个 worker、未知长度、持久后事件、幂等命令、失败 pause、cancel 优先、终态保存失败不饿死其他下载、显式补存无新 HTTP、提交结果丢失/并发补存/身份变化；Journal 为 host fake，不能称真实 Android SQLite。
@@ -272,10 +274,12 @@ Future<void> pause(String taskId) async {
 - 恢复测试：独立 Python hashlib/struct 固定向量及重复 snapshot；真实 GET 206/200/416/redirect、强弱验证器、坏 Range/长度/total、源 prefix 与 tail、复制中断、candidate close、首异常与 typed suppressed 关闭异常。after-force/双 close、late CANCEL、响应头停止等已有核心回归保留。
 - 公开 Coordinator.resume 入口真实 socket/file/core 回归：enqueue→pause8192→resume→pause16384→resume→publishing，3GET/2candidate，逐字节/whole SHA256、原24576字节 tail及旧 candidate不变。重复/NULL/旧身份、坏 prefix、queued stop、同执行一 worker/全局两 worker、新 Runtime 零请求与显式继续、persist-before-event、终态补存零新增 GET/candidate。Journal 为 host fake。
 - 认证/复制各 PAUSE/CANCEL 四组合、复制暂停伴随 payload.close 失败、final proof 屏障暂停伴随提交失败和持久 cancel 竞争使用确定 latch；分别保留旧 proof、返回 fileWriteFailure/persistenceFailure 或 cleanupFailure，不把 Stopped.bytes 作进度。
-- 20项 SQLite instrumentation 覆盖历史迁移/回滚、resume/branch 归属与 v7 意图/完成结果、候选双向归属、删除前重验，已在 API37 模拟器真实执行并独立复跑，20个唯一 case、零失败/错误/跳过（11.615s）。日志 `/tmp/android-sqlite-independent-final.log`、`/tmp/android-sqlite-independent-final-results.xml`，Gradle正常退出0。跨连接分配门已覆盖；跨连接清理竞争及完整 generation/故障组合仍未执行。
+- 20项 SQLite instrumentation 覆盖历史迁移/回滚、resume/branch归属、v7意图/完成结果、候选双向归属及删除前重验，已在API37独立实跑20个唯一case、零失败/错误/跳过，XML `/tmp/android-fgs-race-independent-sqlite/`。跨连接分配门已覆盖；跨连接清理竞争及完整generation/故障组合仍未执行。
 - 取消生产入口真实 socket/file 回归覆盖终态补存、错误身份拒绝、Int/Long 等价及并发重放只补一次、零新增 GET，关闭失败保留原件/候选；Journal 为 host fake。清理核心覆盖整集合校验、symlink/越界零删除、部分删除和 done 失败重试。
 - Instrumentation runner 逐 case 报 start=1/pass=0/failure=-2 和 class/test/current/numtests；finish 及 adb 退出0不能代替 XML 的非零用例数与失败状态。后台 responder 捕获所属 case 的异常队列，join 超时/中断使该 case 失败，迟到异常不得归入下个 case。TCP read 无固定分片大小，暂停夹具按累计阈值等待，保留精确 offset/Range/hash 断言；失败历史 XML 须证明 Gradle 拒绝且后续 case 继续。
-- 后续执行 API29/30/33/35/36 的 Service、通知/后台限制、timeout、Activity 重连、强杀重开零 HTTP、TLS、SQLite/磁盘故障和真实大文件；目录 fsync、发布完成材料释放与用户目录发布仍未验收。
+- [Runtime设备脚本](../../../integration_test/android_engine_runtime_check.py) 独立退出0，`/tmp/android-fgs-race-independent/summary.json` 的七个完成case为 lifecycle、revokedBeforePauseCallback、revokedBeforeCancelCallback、permissionChangedBeforeCallback、denied、deniedPromotion、inspectAfterKill，各XML 1/0/0/0。实际 MainActivity→Runtime.coordinator→Service→worker→SQLite，绕过MethodChannel编码，不是Flutter业务E2E。Activity finish/重开期间继续；pause303104字节/version7后1.2秒不变，Range bytes=303104-/If-Range runtime-v1实际206，cancel311296字节/version13/cancelling/error=null且1个原件双文件及1个候选双文件均清理。HTTP恰3次，seedKill仅准备不算通过；跨强杀同engineId正字节旧记录可读，重开仅inspect观测窗口新增GET为0。
+- 三个系统接受启动后的交错真实注入PAUSE/CANCEL/通知权限变化，要求零新增HTTP/材料/字节、持久停止或failed/permissionDenied；各等待12秒且捕获logcat无FGS启动超时。afterServiceStartAccepted默认null，仅在主线程真实start返回、pending锁释放后及Service callback前作测试屏障。通知测试临时shell身份真实撤权并finally释放；反射失败即用例失败，不替换权限判断。旧实例promotion失败归属和多start主要为源码/JVM证据，未称设备逐项故障注入。
+- 后续执行 API29/30/33/35/36真机、完整MethodChannel、真实系统timeout/reboot/natural kill/background限制、平台promotion拒绝、TLS/真实磁盘force-close及大文件；目录fsync、非空release ack和用户目录发布仍未验收。
 
 ### 7. Wrong vs Correct
 
@@ -288,3 +292,6 @@ Future<void> pause(String taskId) async {
 
 清理错误：收到 cancelling 接受回执就删文件，按路径扫描候选，或普通 ack 删除暂停材料。
 清理正确：持久完整取消意图/归属清单 → CANCEL → 实际退出/关闭/终态落库 → 双向归属重验及整集合文件校验 → 逐成员删除/done → 完成结果事务；失败显式原命令重放，不新增 HTTP。
+
+FGS错误：系统已接受启动后因撤销token/通知拒绝直接stopSelf，或旧实例catch无条件launchFailed(token)。
+FGS正确：每次交付先promotion → 独立校验下载授权 → 失败按acceptsFailure/owned集合归因；撤销token仍零worker/HTTP，旧实例不得失败新实例ready前的授权。

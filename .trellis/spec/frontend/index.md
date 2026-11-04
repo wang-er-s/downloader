@@ -4,7 +4,7 @@
 
 适用于本仓库 Flutter 应用及各平台适配：Android、macOS、Windows 为必需平台，iOS 为希望一并提供、需验证可行性的平台。采用按功能组织目录、MVVM 职责划分、Repository/Service 分层，Riverpod 负责状态管理与依赖注入。复杂业务按需提取 UseCase。
 
-这是已确认的架构约定；领域/执行 DTO、DownloadEngine 与 FileStorage 接口及 AppStore v1 已实现。PluginEngine 与固定 9.5.9 补丁已接入，桌面局部验证已独立复核，插件子任务仍未验收。Android Dart 桥接、新下载、v6 公开 resume 及 v7 显式取消/受控清理生产链已获主机局部独立 PASS：停止后才按持久完整归属集合清理，部分删除可显式重放，普通/旧 ack 不删除材料。最新88项 JVM、静态分析与 debug APK 通过；Dart 未改沿用前轮独立102项，20项 Android SQLite instrumentation 已在 API37 模拟器独立实跑，20/0失败/0错误/0跳过；runner 按 case 报告结果并隔离后台异常。设备 Service/通道、API29/30/33/35/36真机矩阵与完整引擎仍 BLOCK；非空 releaseResumeRefs 仍拒绝，无安全 proof 的续传仍 restartRequired。具体执行、恢复与清理契约见 architecture.md。`lib/main.dart` 仍为计数器，Repository、Riverpod、用户目录发布与业务界面尚未实现。
+这是已确认的架构约定；领域/执行 DTO、DownloadEngine 与 FileStorage 接口及 AppStore v1 已实现。PluginEngine 与固定9.5.9补丁已接入，桌面局部验证已独立复核，插件子任务仍未验收。Android 桥接、新下载、v6公开resume、v7显式取消清理及FGS启动后撤权修复已独立局部PASS；普通/旧ack不删除材料。最新93项JVM、静态分析与debug APK通过，Dart未改沿用前轮独立102项。API37模拟器独立实跑20项SQLite及7项Runtime/Service用例，均零失败/错误/跳过；覆盖Activity detach/重连、安全206、取消归属清理、启动后PAUSE/CANCEL/通知撤权及强杀重开观测窗口新增GET为0。Runtime夹具绕过MethodChannel编解码，完整通道、API29/30/33/35/36真机矩阵与完整引擎仍BLOCK。非空releaseResumeRefs仍拒绝，无安全proof续传仍restartRequired。具体契约及证据边界见architecture.md。`lib/main.dart`仍为计数器，Repository、Riverpod、用户目录发布与业务界面尚未实现。
 
 ## 规范入口
 

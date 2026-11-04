@@ -25,35 +25,70 @@ class ExecutionJournalTest : Instrumentation() {
         }
     }
 
+    private var runtimeMode: String? = null
+    private var runtimeUrl = "http://127.0.0.1:18765"
+
     override fun onCreate(arguments: Bundle?) {
+        runtimeMode = arguments?.getString("runtimeMode")
+        runtimeUrl = arguments?.getString("runtimeUrl") ?: runtimeUrl
         super.onCreate(arguments)
         start()
     }
 
     override fun onStart() {
+        val runtime = ServiceRuntimeTest(this, runtimeUrl)
         val tests =
-            listOf(
-                ::testHandshakePersistenceReplayAndAck,
-                ::testIdentityPayloadAndRollback,
-                ::testConcurrentAllocationGateAcrossConnections,
-                ::testMaterialRegistrationAndClosedCheckpoint,
-                ::testMaterialInsertFailureCreatesNothing,
-                ::testV1MigrationAndFailurePreserveHistory,
-                ::testWorkerLifecycleAndStopAuthorization,
-                ::testV2MigrationPreservesUnknownCommands,
-                ::testWorkerCommandBindingAndCancelCannotBeRevoked,
-                ::testUnknownVersionPreservesHistory,
-                ::testTerminalSaveRollbackAndIdempotentRetry,
-                ::testProductionForcedCheckpointAndV3Migration,
-                ::testV3MigrationFailurePreservesHistory,
-                ::testCancelledWorkerCannotPromoteOrRecoverProof,
-                ::testV4CandidateProofMigrationRetainsHistory,
-                ::testPublicResumeAtomicVersionAndRetirement,
-                ::testV5MigrationRollback,
-                ::testPublicPersistedCancelBlocksProofAndLateStaging,
-                ::testCancelCleanupReopenOwnershipAndRollback,
-                ::testV6CleanupMigrationRollback,
-            )
+            when (runtimeMode) {
+                "lifecycle" -> {
+                    listOf(runtime::lifecycle)
+                }
+
+                "revokedBeforePauseCallback" -> listOf(runtime::revokedBeforePauseCallback)
+                "revokedBeforeCancelCallback" -> listOf(runtime::revokedBeforeCancelCallback)
+                "permissionChangedBeforeCallback" -> listOf(runtime::permissionChangedBeforeCallback)
+                "deniedPromotion" -> listOf(runtime::deniedPromotion)
+
+                "denied" -> {
+                    listOf(runtime::denied)
+                }
+
+                "seedKill" -> {
+                    listOf(runtime::seedKill)
+                }
+
+                "inspectAfterKill" -> {
+                    listOf(runtime::inspectAfterKill)
+                }
+
+                null -> {
+                    listOf(
+                        ::testHandshakePersistenceReplayAndAck,
+                        ::testIdentityPayloadAndRollback,
+                        ::testConcurrentAllocationGateAcrossConnections,
+                        ::testMaterialRegistrationAndClosedCheckpoint,
+                        ::testMaterialInsertFailureCreatesNothing,
+                        ::testV1MigrationAndFailurePreserveHistory,
+                        ::testWorkerLifecycleAndStopAuthorization,
+                        ::testV2MigrationPreservesUnknownCommands,
+                        ::testWorkerCommandBindingAndCancelCannotBeRevoked,
+                        ::testUnknownVersionPreservesHistory,
+                        ::testTerminalSaveRollbackAndIdempotentRetry,
+                        ::testProductionForcedCheckpointAndV3Migration,
+                        ::testV3MigrationFailurePreservesHistory,
+                        ::testCancelledWorkerCannotPromoteOrRecoverProof,
+                        ::testV4CandidateProofMigrationRetainsHistory,
+                        ::testPublicResumeAtomicVersionAndRetirement,
+                        ::testV5MigrationRollback,
+                        ::testPublicPersistedCancelBlocksProofAndLateStaging,
+                        ::testCancelCleanupReopenOwnershipAndRollback,
+                        ::testV6CleanupMigrationRollback,
+                    )
+                }
+
+                else -> {
+                    error("Unknown runtimeMode: $runtimeMode")
+                }
+            }
         var failures = 0
         for ((index, test) in tests.withIndex()) {
             fun status() =
