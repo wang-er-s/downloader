@@ -163,3 +163,30 @@ flutter analyze、flutter test；在 android/ 下运行 ./gradlew :app:testDebug
 - 按 trellis-update-spec 判断，本轮引入跨通道执行、v3授权表、实例握手、停止优先级、持久后事件和终态本地补存，必须更新可执行规范。architecture.md合并更新Android七节契约，index.md及源设计状态同步生产调用链；共享AppStore v1/schema不变，旧v2材料门不再作为当前引擎状态。
 - 检查点提交范围仅本任务原生实现/manifest/测试、Dart桥接错误分类及测试、任务design/implement和三份规范；不包含既有.pi配置或docs图片，不改变task.json或完整PRD验收框。提交只保存已独立检查的局部成果，不归档、不增加父任务完成数。
 - 下一轮优先闭合安全续传：先建立持久验证器、认证偏移与原件保留材料协议，再接实际GET写前206/Range/强验证器核验和用户显式恢复，未知旧材料继续restartRequired；受控清理与真实设备矩阵仍是独立门槛。11项Android SQLite测试目前仅编译，不能因主机44/102或debug APK通过标为设备通过。
+
+## 恢复材料第一段计划（本轮）
+
+先实现有界prefix摘要和原生checkpoint类型；接生产HttpTransfer after-force→ExecutionJournal v4持久回调并保留已有生命周期/终态规则；再实现内部实际GET响应门及先登记candidate的原件保留路径。新增真实loopback/文件与迁移编译回归；不开放外部resume、不修改共享DTO或能力声明。最后运行原生JUnit/AndroidTest编译、analyze，明确设备与完整resume调度仍未验收。
+
+## 恢复材料第一段实际检查点（2026-11-04，完整resume仍BLOCK）
+
+- 生产newTransfer现在显式接入onCheckpoint：实际写入及output.force/facts.force后才认证offset；onSample继续只计进度。暂停最终checkpoint在payload关闭及closed事实force后保存；短EOF/force前回调失败不提升最终offset，保留较早已force检查点。回调通过既有allocation队列边界串行落ExecutionJournal，不改Service/Stop/terminalSavePending/CANCEL优先代码。
+- NativePrefixDigest为native-prefix-v1-65536：64KiB固定块、domain-separated SHA256链与有界tail快照；不克隆provider、不反复扫整文件、不称普通SHA256。强ETag/URL/算法/完整执行归属/认证offset和total存独立日志；无/弱ETag或旧facts不提供恢复证明。回执版本关联只更新引用，不把progress字节提升为offset；对外resumeSupport及resume命令仍保持保守拒绝。
+- 日志v4逐版本保留v1/v2/v3表与历史，新增resume_checkpoints/recovery_attempts/recovery_operations。内部newRecovery只读本日志的opaque ref和固定完整pending resume命令，要求源worker真实finished且未cancel；beforeRequest一次性持久attempt阻止同命令重传，真实响应全部校验后才持久candidate intent并排他创建。inspectResume/inspectRecoveries仅原生诊断，不调度网络/创建/删除。对外Coordinator仍在register之前拒绝resume，未接完整恢复worker授权与生命周期。
+- ResumeTransfer真实GET带Range/If-Range，先线性认证源prefix，再验证206/完全一致的强ETag、精确Content-Range起止/total、Content-Length（存在时）与旧total。所有响应门通过之后才登记candidate并复制已认证prefix，再次复核复制digest后追加suffix；源文件永不截断。COPY/短EOF失败保留源和已登记candidate；没有候选恢复继续/受控清理接口，本轮不将失败candidate当作新恢复源。
+- 真正主机验证：android目录既有JBR执行./gradlew -Pandroid.builder.sdkDownload=false :app:testDebugUnitTest :app:compileDebugAndroidTestKotlin :app:assembleDebug正常退出0，最终/tmp/android-resume-delivery-final.log。53项JVM＝协议5+HTTP19+Coordinator15+Lifecycle7+Resume7，零failures/errors/skipped。新增9项覆盖强ETag暂停checkpoint重读、progress早于force无认证、失败保留较早offset、无/弱validator、实际206/candidate/源8192认证prefix与24576尾部hash不变、200/416/坏Range/总长/ETag/长度/overflow拒绝、copy中断/短EOF/落库回调失败无staged、symlink sentinel、无Content-Length字节与分块digest独立向量。>4GiB仅Range解析边界，不是实际大文件传输。
+- Android SQLite instrumentation新增2项，共13项仅编译：生产newTransfer→真实Socket→强ETag暂停→日志重开；v3迁移及第二DDL失败回滚，保留v1/v2/未知版本断言。adb devices -l仍空；没有运行设备SQLite/Service，不能因编译声称迁移或持久化设备通过。
+- flutter analyze正常退出No issues found，/tmp/android-resume-analyze.log。本轮无Dart改动，复用独立续审102项Dart通过，没有重跑或声称本轮运行flutter test。首次Kotlin编译因混合可空SQL参数arrayOf推断交叉类型失败，显式Any?后通过；失败日志/tmp/android-resume-first.log保留。其后新增回归均正常退出。
+- 基线596文件manifest除6个授权已有文件外匹配；新增仅原生NativeResumeMaterial/ResumeTransfer及对应JVM测试。protected10全hash匹配，git diff --check通过，暂存空。未stage/commit/push/archive、未改task.json/PRD/frontend/source specs/共享DTO/其他平台/依赖/SDK/manifest，未安装SDK/改license/启AVD。
+- 下一最小项：独立复核摘要/force时序/v4命令与材料门，之后再接完整resume调度（同执行worker、当前进程用户授权、停止/回执/幂等），以及candidate继续/废弃、受控释放和设备迁移/磁盘故障。当前核心候选完成只记录内部staged，未产生用户resume成功或completed；未实现用户目录发布、目录fsync、真实>4GiB传输。完整Android与PRD验收继续BLOCK，全部验收框未勾。
+
+## 恢复安全门第一段独立检查（2026-11-04，内部局部PASS）
+
+- 读取当前check.jsonl六条、PRD、任务design及implement最新完整恢复段、实施完整报告；沿用已读源设计主体并核对材料/恢复/回执相关契约。独立审查本轮9文件及生产newTransfer注入、v4事务和内部newRecovery真实GET路径。没有开放resume；Coordinator仍在register前restartRequired，Service/Lifecycle/Coordinator/Dart均未修改。
+- 修复final proof过早提交：原先payload关闭后、facts.close之前就调用最终onCheckpoint；现在payload与facts均真实关闭成功后才提交最终proof。周期proof仍要求payload.force和facts.force；facts关闭失败保留更早已force proof，不提升终态offset。新增真实loopback、两阶段barrier及真实close helper故障注入，证实旧offset/digest保留、没有暂停伪成功。
+- 修复初始prefix线性认证不可及时响应Stop：现在每64KiB认证块后检查原子Stop，复制原有检查仍保留；新增认证首块请求CANCEL的确定性回归，beforeRequest与candidate均零调用，原件hash不变。新增candidate真实close helper故障回归，文件错误不会标staged；disconnect错误按NETWORK包装并作为suppressed保留首Journal错误，增加对应回归。suffix计数溢出也明确归HTTP阶段。
+- 强化日志门：cancel已持久后不再提升恢复proof；既有proof算法也须一致；newRecovery核对冻结载荷与NativeCommand的ownerSessionId一致，并在每次授权重查源worker完整engine/generation/version与proof receipt_version和当前执行版本一致，避免旧proof与新事实混用。新增取消proof不可提升/不可恢复的SQLite instrumentation；扩展已有生产检查点测试覆盖同offset换digest/total拒绝、factory后旧receipt proof在GET前拒绝、内部实际206→candidate→staged及同命令一次性请求拒绝。这些设备测试只编译，未运行。
+- 独立用Python hashlib.sha256与struct.pack('>qI')重新计算0/1/65535/65536/65537/131072/200000字节固定向量，与实现方200000向量一致；新增边界及重复snapshot回归，分片输入不依赖同实现互证。摘要保持64KiB块+32字节chain+有界tail，不克隆provider；恢复认证/复制线性读源，不截断或提升未提交tail。
+- 独立最终Gradle（既有JBR、sdkDownload=false，testDebugUnitTest+compileDebugAndroidTestKotlin+assembleDebug）正常退出0，日志/tmp/android-resume-check-gradle.log。JUnit XML 58项=Protocol5+HTTP20+Coordinator15+Lifecycle7+Resume11，零failure/error/skipped。flutter analyze正常退出No issues found，/tmp/android-resume-check-analyze.log；无Dart变更，沿用上轮独立102项，不声称本轮重跑flutter test。14项SQLite instrumentation仅编译，adb无设备；未安装SDK/改license/启AVD。
+- 审查备份android-resume-review-t7zk27bu可访问；600文件manifest差异仅授权源码/测试和本implement记录，protected10全部MATCH，暂存空，diff --check通过，既有.pi/docs保留。未stage/commit/push/archive，未改task.json/PRD/源规范/frontend specs/非Android实现/依赖或SDK。
+- 内部安全门局部PASS，无剩余本轮源码阻断；完整resume/引擎与设备仍BLOCK。下一最小项是将opaque proof绑定当前进程用户授权与同执行恢复worker，闭合stop/receipt/幂等及candidate继续/废弃/受控释放，不能直接放开公开resume。还需真实SQLite迁移/force-close故障、设备Service与API29/30/33/35/36、目录fsync/用户目录发布和真实>4GiB传输。私有sandbox不声称抵御同UID恶意并发替换；kill后只认已持久事实。

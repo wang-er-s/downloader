@@ -83,3 +83,13 @@ worker事实、stop与pause结果现在在事务内完整核对命令/会话/执
 A–E源码局部通过。实际startService/startForeground抛错时同步撤销grant，foreground失败不等待日志队列即可安排epoch约束的idle停止；timeout退休整个所属实例并无参stopSelf，避免旧startId遗留该实例的较新请求。持久cancel在终态补存失败期间仍按完整命令重放原cleanupFailure，不撤销取消意图、不隐式重新运行HTTP。新增失败启动/多start实例/取消重放回归，补存拒绝身份变化及同命令并发结果一致。
 
 独立44项JVM、102项Dart及实际SDK编译/debug构建通过；11项SQLite instrumentation仅编译。没有剩余本轮源码阻断，设备Service回调/IPC延迟、SQLite、权限与timeout、强杀重开及平台矩阵仍BLOCK；安全续传、受控清理/发布、fsync和真实大文件未据此验收。完整PRD保持未勾选。
+
+## 恢复材料安全门第一段（本轮内部设计）
+
+本轮不开放对外resume调度。原生日志v4新增resume_checkpoints和recovery_operations，保留v1/v2/v3历史；生产newTransfer必须接入独立的after-force检查点回调，记录完整命令/执行键/原生源文件、当前回执版本、认证offset、total、最终URL、强ETag和明确版本的prefix摘要。进度onSample仍不认证offset。无强ETag、旧facts或未知材料不生成可恢复声明。
+
+摘要使用64KiB固定块、带domain分隔的SHA256链及有界tail快照（native-prefix-v1-65536），不克隆provider状态、不冒充普通SHA256；恢复线性读取认证prefix，每64KiB检查Stop。内部ResumeTransfer只接原生日志读出的完整checkpoint，不接channel路径/URL。实际GET带Range/If-Range，响应206/ETag/Content-Range/长度/total全部核验后，先持久候选意图，再CREATE_NEW+NOFOLLOW复制并重验prefix及写入candidate；原源文件永不截断。短EOF不认证candidate为完整，不自动清理旧材料。用户resume协调授权、受控清理/发布另轮闭合，当前通道仍restartRequired。
+
+第一段实现补充：v4另有recovery_attempts一次性请求意图，先于实际GET提交，结果不明不得同命令重发；candidate操作记录只在响应安全门通过后、输出创建前提交。恢复core可由内部newRecovery固定命令/ref构建，但尚无公共调度调用方。已force源检查点和私有candidate均保留；candidate本轮不提升为新的恢复源，不提供失败候选自动继续/清理。对外resume仍restartRequired，完整worker/session/stop/receipt授权闭合另轮处理。独立58项主机JVM及14项instrumentation编译不替代设备验收。
+
+独立复核补充：最终proof须等payload与facts均真实关闭成功，周期proof先双force；facts关闭失败只保留较早proof。持久cancel后不推进proof，同offset/算法/URL/total/ETag变化拒绝；工厂、GET前、候选登记和staged重验冻结owner、完整源worker与proof/current receipt版本，不由旧proof授权新事实。候选close失败不staged，认证中CANCEL不触发GET；首异常保留，typed disconnect关闭错误仅suppressed。独立摘要边界向量、真实HTTP/文件回归及SDK构建局部PASS，公开调度与设备验收仍BLOCK。

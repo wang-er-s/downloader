@@ -84,6 +84,102 @@ class HttpTransferTest {
         } finally { root.deleteRecursively() }
     }
 
+    @Test fun factsCloseFailureCannotPromoteFinalProofPastEarlierForce() = server { server, base ->
+        val saved = CountDownLatch(1)
+        server.createContext("/close-proof") { exchange ->
+            exchange.responseHeaders.add("ETag", "\"strong\"")
+            exchange.sendResponseHeaders(200, 2048)
+            exchange.responseBody.use { output ->
+                output.write(ByteArray(1024) { 7 }); output.flush()
+                check(saved.await(5, TimeUnit.SECONDS))
+                output.write(ByteArray(1024) { 8 })
+            }
+        }
+        val root = root()
+        val proofs = mutableListOf<ForcedMaterial>()
+        val stop = HttpTransfer.Stop()
+        var clockCalls = 0
+        var closes = 0
+        val closeFailure = java.io.IOException("facts close injection")
+        try {
+            try {
+                HttpTransfer(root, onCheckpoint = { proofs.add(it); saved.countDown() },
+                    monotonicNanos = { if (clockCalls++ == 0) 0 else 2_000_000_000L },
+                    closeResource = { resource -> resource.close(); if (++closes == 2) throw closeFailure },
+                    onAllocation = { _, _, _ -> }).run(key, "$base/close-proof", stop) { sample ->
+                    if (proofs.isNotEmpty() && sample.bytes > proofs.single().offset) stop.request(HttpTransfer.Stop.Reason.PAUSE)
+                }
+                fail("close failure must reject")
+            } catch (error: HttpTransfer.Failure) {
+                assertEquals("fileWriteFailure", error.code)
+                assertSame(closeFailure, error.cause)
+                assertEquals(2, closes)
+                assertEquals(1, proofs.size)
+                assertTrue(proofs.single().offset < error.bytes)
+                assertEquals(proofs.single().prefixDigest, NativePrefixDigest.read(proofs.single().source, proofs.single().offset).snapshot())
+            }
+        } finally { saved.countDown(); root.deleteRecursively() }
+    }
+
+    @Test fun forcedPauseCheckpointIsSeparateFromProgressAndCanBeReadBack() = server { server, base ->
+        server.createContext("/etag") { exchange ->
+            exchange.responseHeaders.add("ETag", "\"strong\"")
+            exchange.sendResponseHeaders(200, 8192)
+            exchange.responseBody.use { it.write(ByteArray(8192) { 11 }) }
+        }
+        val root = root()
+        val saved = File(root, "checkpoint.bin")
+        val stop = HttpTransfer.Stop()
+        val checkpoints = mutableListOf<ForcedMaterial>()
+        try {
+            val result = HttpTransfer(root, onCheckpoint = { forced ->
+                assertEquals(forced.prefixDigest, NativePrefixDigest.read(forced.source, forced.offset).snapshot())
+                java.io.DataOutputStream(saved.outputStream()).use { it.writeLong(forced.offset); it.writeUTF(forced.prefixDigest); it.writeUTF(forced.etag) }
+                checkpoints.add(forced)
+            }, onAllocation = { _, _, _ -> }).run(key, "$base/etag", stop) {
+                assertTrue("progress cannot authenticate force offset", checkpoints.isEmpty())
+                stop.request(HttpTransfer.Stop.Reason.PAUSE)
+            }
+            assertEquals(HttpTransfer.Stop.Reason.PAUSE, result.stop)
+            java.io.DataInputStream(saved.inputStream()).use {
+                assertEquals(8192L, it.readLong()); assertEquals(checkpoints.single().prefixDigest, it.readUTF()); assertEquals("\"strong\"", it.readUTF())
+            }
+            assertEquals(8192L, checkpoints.single().offset)
+        } finally { root.deleteRecursively() }
+    }
+
+    @Test fun failureKeepsOnlyPriorForcedCheckpointAndWeakEtagsDoNotAuthenticate() = server { server, base ->
+        for ((path, etag) in listOf("strong" to "\"strong\"", "weak" to "W/\"strong\"", "missing" to null)) {
+            server.createContext("/$path") { exchange ->
+                if (etag != null) exchange.responseHeaders.add("ETag", etag)
+                exchange.sendResponseHeaders(200, 200000)
+                exchange.responseBody.use { it.write(ByteArray(100000) { 5 }) } // deliberately short
+            }
+        }
+        val root = root()
+        try {
+            for (path in listOf("strong", "weak", "missing")) {
+                val checkpoints = mutableListOf<ForcedMaterial>()
+                var clock = 0L
+                var samples = 0
+                try {
+                    HttpTransfer(root, onCheckpoint = { checkpoints.add(it) }, monotonicNanos = { clock += 2_000_000_000; clock }, onAllocation = { _, _, _ -> }).run(key, "$base/$path") {
+                        samples++
+                        if (samples == 2) throw java.io.IOException("progress persistence failed before force")
+                    }
+                    fail("failure expected")
+                } catch (error: HttpTransfer.Failure) {
+                    if (path == "strong") {
+                        assertEquals(1, checkpoints.size)
+                        val prior = checkpoints.single()
+                        assertTrue(prior.offset < error.bytes)
+                        assertEquals(prior.prefixDigest, NativePrefixDigest.read(prior.source, prior.offset).snapshot())
+                    } else assertTrue(checkpoints.isEmpty())
+                }
+            }
+        } finally { root.deleteRecursively() }
+    }
+
     @Test fun boundUrlCannotBeReplacedBeforeAllocation() {
         val root = root()
         var calls = 0

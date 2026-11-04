@@ -18,12 +18,12 @@ class ExecutionJournalTest : Instrumentation() {
     override fun onStart() {
         val output = Bundle()
         try {
-            for (test in listOf(::testHandshakePersistenceReplayAndAck, ::testIdentityPayloadAndRollback, ::testConcurrentAllocationGateAcrossConnections, ::testMaterialRegistrationAndClosedCheckpoint, ::testMaterialInsertFailureCreatesNothing, ::testV1MigrationAndFailurePreserveHistory, ::testWorkerLifecycleAndStopAuthorization, ::testV2MigrationPreservesUnknownCommands, ::testWorkerCommandBindingAndCancelCannotBeRevoked, ::testUnknownVersionPreservesHistory, ::testTerminalSaveRollbackAndIdempotentRetry)) {
+            for (test in listOf(::testHandshakePersistenceReplayAndAck, ::testIdentityPayloadAndRollback, ::testConcurrentAllocationGateAcrossConnections, ::testMaterialRegistrationAndClosedCheckpoint, ::testMaterialInsertFailureCreatesNothing, ::testV1MigrationAndFailurePreserveHistory, ::testWorkerLifecycleAndStopAuthorization, ::testV2MigrationPreservesUnknownCommands, ::testWorkerCommandBindingAndCancelCannotBeRevoked, ::testUnknownVersionPreservesHistory, ::testTerminalSaveRollbackAndIdempotentRetry, ::testProductionForcedCheckpointAndV3Migration, ::testV3MigrationFailurePreservesHistory, ::testCancelledWorkerCannotPromoteOrRecoverProof)) {
                 name = "journal-test-${UUID.randomUUID()}.db"
                 journal = ExecutionJournal(targetContext, name)
                 try { test() } finally { journal.close() }
             }
-            output.putString("stream", "PASS 11 real Android SQLite tests")
+            output.putString("stream", "PASS 14 real Android SQLite tests")
             finish(Activity.RESULT_OK, output)
         } catch (error: Throwable) {
             output.putString("stream", error.stackTraceToString())
@@ -75,6 +75,31 @@ class ExecutionJournalTest : Instrumentation() {
         }
     }
 
+    fun testCancelledWorkerCannotPromoteOrRecoverProof() {
+        val c = command()
+        journal.register(c, "s"); journal.acceptWorker(c, "s")
+        val directory = java.io.File(targetContext.filesDir.canonicalFile, "http_staging_v1").apply { mkdirs() }
+        val id = UUID.randomUUID().toString()
+        val source = java.io.File(directory, "$id.part")
+        val facts = java.io.File(directory, "$id.facts")
+        journal.registerMaterials(c, "s", source, facts)
+        java.io.FileOutputStream(source).use { it.write(ByteArray(8) { 7 }); it.channel.force(true) }
+        facts.writeText("test diagnostic")
+        val proof = ForcedMaterial(c.key, source, 4, 16, "http://127.0.0.1:1/", "\"strong\"", NativePrefixDigest.read(source, 4).snapshot())
+        journal.saveResumeCheckpoint(c, "s", proof)
+        val saved = journal.inspectResume(c.key)!!
+        val cancel = command("cancel", 1, method = "cancel")
+        journal.register(cancel, "s")
+        journal.stopWorker(c, cancel, "s", NativeCheckpoint("cancelling", 8))
+        journal.saveResumeCheckpoint(c, "s", proof.copy(offset = 8, prefixDigest = NativePrefixDigest.read(source, 8).snapshot()))
+        assertEquals(saved, journal.inspectResume(c.key))
+        val terminal = journal.finishWorker(c, "s", NativeCheckpoint("cancelling", 8), null)
+        val resume = command("resume", terminal["receiptVersion"] as Long, method = "resume")
+        journal.register(resume, "s")
+        rejects("restartRequired") { journal.newRecovery(resume, "s", saved.ref) }
+        rejects("staleReceipt") { journal.saveResumeCheckpoint(c, "s", proof) }
+    }
+
     fun testWorkerCommandBindingAndCancelCannotBeRevoked() {
         val c = command()
         journal.register(c, "s")
@@ -114,6 +139,92 @@ class ExecutionJournalTest : Instrumentation() {
         assertEquals(receipt, journal.register(pause, "s"))
         rejects("receiptPayload") { journal.finishWorker(c, "s", NativeCheckpoint("paused", 8), pause) }
         assertEquals(2, journal.inspect().size)
+    }
+
+    fun testProductionForcedCheckpointAndV3Migration() {
+        // First prove v3->v4 retains unknown results, with no automatic worker creation.
+        val c0 = command("unknown", generation = 0)
+        journal.register(c0, "s")
+        dropResumeTables(journal.writableDatabase)
+        journal.writableDatabase.version = 3
+        journal.close()
+        journal = ExecutionJournal(targetContext, name)
+        assertEquals(4, journal.writableDatabase.version)
+        rejects("commandOutcomeUnknown") { journal.register(c0, "s") }
+        java.net.ServerSocket(0).use { server ->
+            val responder = Thread {
+                repeat(2) { index -> server.accept().use { socket ->
+                    val reader = socket.getInputStream().bufferedReader()
+                    val request = buildList { while (true) { val line = reader.readLine() ?: break; if (line.isEmpty()) break; add(line) } }
+                    if (index == 1) {
+                        assertTrue(request.any { it.equals("Range: bytes=8192-", true) })
+                        socket.getOutputStream().write(("HTTP/1.1 206 Partial Content\r\nETag: \"strong\"\r\nContent-Range: bytes 8192-16383/16384\r\nContent-Length: 8192\r\nConnection: close\r\n\r\n").toByteArray() + ByteArray(8192) { 9 })
+                    } else socket.getOutputStream().write(("HTTP/1.1 200 OK\r\nETag: \"strong\"\r\nContent-Length: 16384\r\nConnection: close\r\n\r\n").toByteArray() + ByteArray(8192) { 7 })
+                } }
+            }.apply { start() }
+            val original = command("new", generation = 1)
+            val input = EngineProtocol.map(original.payload["input"]) + ("url" to "http://127.0.0.1:${server.localPort}/")
+            val c = EngineProtocol.command("enqueue", original.payload + ("input" to input))
+            journal.register(c, "s")
+            journal.acceptWorker(c, "s")
+            val stop = HttpTransfer.Stop()
+            val result = journal.newTransfer(c, "s").run(c.key, input["url"] as String, stop) {
+                assertNull(journal.inspectResume(c.key)) // sample precedes force
+                stop.request(HttpTransfer.Stop.Reason.PAUSE)
+            }
+            val saved = journal.inspectResume(c.key)!!
+            assertEquals(8192L, saved.forced.offset)
+            assertEquals(NativePrefixDigest.read(result.file, saved.forced.offset).snapshot(), saved.forced.prefixDigest)
+            assertEquals("\"strong\"", saved.forced.etag)
+            rejects("restartRequired") { journal.saveResumeCheckpoint(c, "s", saved.forced.copy(prefixDigest = "00".repeat(32))) }
+            rejects("restartRequired") { journal.saveResumeCheckpoint(c, "s", saved.forced.copy(total = 20000)) }
+            val pause = command("p", 1, generation = 1, method = "pause")
+            journal.register(pause, "s")
+            journal.stopWorker(c, pause, "s", NativeCheckpoint("running", result.bytes))
+            val receipt = journal.finishWorker(c, "s", NativeCheckpoint("paused", result.bytes), pause)
+            assertEquals(receipt["receiptVersion"], journal.inspectResume(c.key)!!.receiptVersion)
+            journal.close(); journal = ExecutionJournal(targetContext, name)
+            assertEquals(saved.forced, journal.inspectResume(c.key)!!.forced)
+            val resume = command("resume", receipt["receiptVersion"] as Long, generation = 1, method = "resume")
+            journal.register(resume, "s")
+            rejects("restartRequired") { journal.newRecovery(resume, "s", "unknown-ref") }
+            rejects("staleSession") { journal.newRecovery(resume.copy(ownerSessionId = "old"), "s", saved.ref) }
+            val recovery = journal.newRecovery(resume, "s", saved.ref)
+            // Factory construction alone never requests HTTP or creates a candidate.
+            journal.readableDatabase.rawQuery("SELECT COUNT(*) FROM recovery_attempts", null).use { it.moveToFirst(); assertEquals(0, it.getInt(0)) }
+            journal.writableDatabase.execSQL("UPDATE resume_checkpoints SET receipt_version=1 WHERE ref=?", arrayOf(saved.ref))
+            rejects("restartRequired") { recovery.run() } // authorization is checked again at run, before GET
+            journal.writableDatabase.execSQL("UPDATE resume_checkpoints SET receipt_version=? WHERE ref=?", arrayOf(receipt["receiptVersion"], saved.ref))
+            val originalBytes = result.file.readBytes().toList()
+            val candidate = journal.newRecovery(resume, "s", saved.ref).run()
+            assertEquals(16384L, candidate.file.length())
+            assertEquals(originalBytes, result.file.readBytes().toList())
+            assertEquals("staged", journal.inspectRecoveries(c.key).single()["phase"])
+            rejects("commandOutcomeUnknown") { journal.newRecovery(resume, "s", saved.ref) }
+            responder.join(5000)
+        }
+    }
+
+    fun testV3MigrationFailurePreservesHistory() {
+        val c = command()
+        journal.register(c, "s")
+        val receipt = journal.complete(c, "s", NativeCheckpoint("paused", 3))
+        dropResumeTables(journal.writableDatabase)
+        journal.writableDatabase.execSQL("CREATE TABLE recovery_attempts (sentinel TEXT)")
+        journal.writableDatabase.version = 3
+        journal.close()
+        journal = ExecutionJournal(targetContext, name)
+        try { journal.inspect(); fail("v4 migration should fail") } catch (_: android.database.sqlite.SQLiteException) { }
+        journal.close()
+        android.database.sqlite.SQLiteDatabase.openDatabase(targetContext.getDatabasePath(name).path, null, 0).use { db ->
+            assertEquals(3, db.version)
+            db.rawQuery("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='resume_checkpoints'", null).use { it.moveToFirst(); assertEquals(0, it.getInt(0)) }
+            db.rawQuery("SELECT payload FROM receipts", null).use { it.moveToFirst(); assertEquals(ExecutionJournal.encode(receipt), it.getString(0)) }
+            db.execSQL("DROP TABLE recovery_attempts")
+        }
+        journal = ExecutionJournal(targetContext, name)
+        assertEquals(receipt, journal.inspect().single())
+        assertEquals(4, journal.writableDatabase.version)
     }
 
     fun testUnknownVersionPreservesHistory() {
@@ -203,16 +314,18 @@ class ExecutionJournalTest : Instrumentation() {
         journal.register(c, "s")
         val receipt = journal.complete(c, "s", NativeCheckpoint("paused", 23))
         // Reconstruct exactly the three v1 tables with their committed history.
+        dropResumeTables(journal.writableDatabase)
         journal.writableDatabase.execSQL("DROP TABLE worker_authorizations")
         journal.writableDatabase.execSQL("DROP TABLE materials")
         journal.writableDatabase.version = 1
         journal.close()
         journal = ExecutionJournal(targetContext, name)
         assertEquals(receipt, journal.inspect().single())
-        assertEquals(3, journal.writableDatabase.version)
+        assertEquals(4, journal.writableDatabase.version)
         assertTrue(journal.inspectMaterials(c.key).isEmpty())
         assertEquals(receipt, journal.register(c, "s"))
         // Fail the SECOND DDL so rollback must undo the newly created materials table.
+        dropResumeTables(journal.writableDatabase)
         journal.writableDatabase.execSQL("DROP TABLE materials")
         journal.writableDatabase.version = 1
         journal.close()
@@ -255,14 +368,21 @@ class ExecutionJournalTest : Instrumentation() {
         rejects("staleReceipt") { journal.workerReceipt(c, "s", NativeCheckpoint("running", 0)) }
     }
 
+    private fun dropResumeTables(db: android.database.sqlite.SQLiteDatabase) {
+        db.execSQL("DROP TABLE recovery_operations")
+        db.execSQL("DROP TABLE recovery_attempts")
+        db.execSQL("DROP TABLE resume_checkpoints")
+    }
+
     fun testV2MigrationPreservesUnknownCommands() {
         val c = command()
         journal.register(c, "s")
+        dropResumeTables(journal.writableDatabase)
         journal.writableDatabase.execSQL("DROP TABLE worker_authorizations")
         journal.writableDatabase.version = 2
         journal.close()
         journal = ExecutionJournal(targetContext, name)
-        assertEquals(3, journal.writableDatabase.version)
+        assertEquals(4, journal.writableDatabase.version)
         rejects("commandOutcomeUnknown") { journal.register(c, "s") }
         assertTrue(journal.inspect().isEmpty())
     }

@@ -10,7 +10,7 @@ import org.json.JSONObject
 internal class ExecutionJournal(
     context: Context,
     name: String = "android_execution_v1.db",
-) : SQLiteOpenHelper(context.applicationContext, name, null, 3) {
+) : SQLiteOpenHelper(context.applicationContext, name, null, 4) {
     private val privateRoot = context.applicationContext.filesDir.canonicalFile
 
     override fun onConfigure(db: SQLiteDatabase) {
@@ -28,6 +28,7 @@ internal class ExecutionJournal(
         )
         createMaterials(db)
         createWorkers(db)
+        createResume(db)
     }
 
     override fun onUpgrade(
@@ -37,11 +38,18 @@ internal class ExecutionJournal(
     ) {
         // SQLiteOpenHelper wraps this migration and user_version update in one transaction.
         // Never rewrite the v1 tables or discard an old database on failure.
-        if (oldVersion !in 1..2 || newVersion != 3) {
+        if (oldVersion !in 1..3 || newVersion != 4) {
             throw EngineProtocolException("protocolMismatch", "journalVersion")
         }
         if (oldVersion == 1) createMaterials(db)
-        createWorkers(db)
+        if (oldVersion <= 2) createWorkers(db)
+        createResume(db)
+    }
+
+    private fun createResume(db: SQLiteDatabase) {
+        db.execSQL("CREATE TABLE resume_checkpoints (ref TEXT PRIMARY KEY NOT NULL, command_id TEXT NOT NULL UNIQUE REFERENCES materials(command_id), receipt_version INTEGER NOT NULL, offset INTEGER NOT NULL CHECK(offset>0), total INTEGER, url TEXT NOT NULL, etag TEXT NOT NULL, digest TEXT NOT NULL, algorithm TEXT NOT NULL)")
+        db.execSQL("CREATE TABLE recovery_attempts (command_id TEXT PRIMARY KEY NOT NULL REFERENCES commands(id), source_ref TEXT NOT NULL REFERENCES resume_checkpoints(ref), phase TEXT NOT NULL)")
+        db.execSQL("CREATE TABLE recovery_operations (id TEXT PRIMARY KEY NOT NULL, resume_command TEXT NOT NULL UNIQUE REFERENCES commands(id), source_ref TEXT NOT NULL REFERENCES resume_checkpoints(ref), candidate TEXT NOT NULL UNIQUE, phase TEXT NOT NULL)")
     }
 
     private fun createWorkers(db: SQLiteDatabase) {
@@ -74,7 +82,9 @@ internal class ExecutionJournal(
         }
         if (captured.method != "enqueue") conflict("materialAllocationUnavailable")
         val url = EngineProtocol.string(EngineProtocol.map(captured.payload["input"]), "url")
-        return HttpTransfer(privateRoot, url) { key, payload, facts ->
+        return HttpTransfer(privateRoot, url, onCheckpoint = { forced ->
+            allocation { saveResumeCheckpoint(captured, session, forced) }
+        }) { key, payload, facts ->
             if (key != captured.key) conflict("staleExecution")
             allocation { registerMaterials(captured, session, payload, facts) }
         }
@@ -141,6 +151,109 @@ internal class ExecutionJournal(
             "INSERT INTO materials(command_id,task,engine,generation,payload_path,facts_path) VALUES(?,?,?,?,?,?)",
             arrayOf<Any>(command.commandId, command.key.taskId, command.key.engineId, command.key.generation, payload.path, facts.path),
         )
+    }
+
+    /** Worker callback after force; progress samples are never accepted as recovery offsets. */
+    fun saveResumeCheckpoint(command: NativeCommand, session: String, forced: ForcedMaterial) = transaction { db ->
+        if (workerStop(db, command, session) == "cancel") return@transaction
+        if (forced.key != command.key || forced.offset <= 0 || forced.total?.let { forced.offset > it } == true ||
+            !NativeMaterialPaths.strongEtag(forced.etag) || forced.algorithm != NativePrefixDigest.ALGORITHM ||
+            !forced.prefixDigest.matches(Regex("[0-9a-f]{64}"))) conflict("restartRequired")
+        NativeMaterialPaths.validate(privateRoot, forced.source)
+        if (forced.source.length() < forced.offset) conflict("restartRequired")
+        db.rawQuery("SELECT payload_path FROM materials WHERE command_id=? AND task=? AND engine=? AND generation=?", arrayOf(command.commandId, command.key.taskId, command.key.engineId, command.key.generation.toString())).use {
+            if (!it.moveToFirst() || it.getString(0) != forced.source.path) conflict("materialOwnership")
+        }
+        val url = java.net.URI(forced.effectiveUrl)
+        if (url.scheme !in listOf("http", "https") || url.host.isNullOrBlank() || url.rawUserInfo != null || url.fragment != null || url.port !in -1..65535) conflict("restartRequired")
+        val version = execution(db, command.key)!!.first
+        var ref: String? = null
+        db.rawQuery("SELECT ref,offset,total,url,etag,digest,algorithm FROM resume_checkpoints WHERE command_id=?", arrayOf(command.commandId)).use {
+            if (it.moveToFirst()) {
+                ref = it.getString(0)
+                val priorTotal = if (it.isNull(2)) null else it.getLong(2)
+                if (forced.offset < it.getLong(1) || priorTotal != forced.total || it.getString(3) != forced.effectiveUrl || it.getString(4) != forced.etag ||
+                    it.getString(6) != forced.algorithm ||
+                    (forced.offset == it.getLong(1) && it.getString(5) != forced.prefixDigest)) conflict("restartRequired")
+            }
+        }
+        if (ref == null) {
+            ref = java.util.UUID.randomUUID().toString()
+            db.execSQL("INSERT INTO resume_checkpoints(ref,command_id,receipt_version,offset,total,url,etag,digest,algorithm) VALUES(?,?,?,?,?,?,?,?,?)", arrayOf<Any?>(ref, command.commandId, version, forced.offset, forced.total, forced.effectiveUrl, forced.etag, forced.prefixDigest, forced.algorithm))
+        } else db.execSQL("UPDATE resume_checkpoints SET receipt_version=?,offset=?,digest=? WHERE ref=?", arrayOf<Any?>(version, forced.offset, forced.prefixDigest, ref))
+    }
+
+    /** Private facts only; never a scheduling source or channel path authorization. */
+    fun inspectResume(key: ExecutionKey): NativeResumeMaterial? = transaction { db ->
+        execution(db, key) ?: conflict("staleExecution")
+        db.rawQuery("SELECT r.ref,r.command_id,r.receipt_version,m.payload_path,r.offset,r.total,r.url,r.etag,r.digest,r.algorithm FROM resume_checkpoints r JOIN materials m ON m.command_id=r.command_id WHERE m.task=? AND m.engine=? AND m.generation=?", arrayOf(key.taskId, key.engineId, key.generation.toString())).use {
+            if (!it.moveToFirst()) null else NativeResumeMaterial(it.getString(0), it.getString(1), it.getLong(2), ForcedMaterial(key, java.io.File(it.getString(3)), it.getLong(4), if (it.isNull(5)) null else it.getLong(5), it.getString(6), it.getString(7), it.getString(8), it.getString(9)))
+        }
+    }
+
+    /** Internal only. Public resume remains gated in Coordinator, no startup caller invokes this. */
+    fun newRecovery(command: NativeCommand, session: String, ref: String): ResumeTransfer {
+        val captured = EngineProtocol.command(command.method, decode(encode(command.payload)))
+        if (captured.key != command.key || captured.commandId != command.commandId || command.method != "resume" || captured.ownerSessionId != command.ownerSessionId || captured.ownerSessionId != session || captured.expectedReceiptVersion != command.expectedReceiptVersion) conflict("staleSession")
+        val material = inspectResume(command.key) ?: conflict("restartRequired")
+        if (material.ref != ref) conflict("restartRequired")
+        fun validate(db: SQLiteDatabase) {
+            val current = execution(db, captured.key) ?: conflict("staleExecution")
+            if (current.first != captured.expectedReceiptVersion) conflict("staleReceipt")
+            db.rawQuery("SELECT MAX(generation) FROM executions WHERE task=?", arrayOf(captured.key.taskId)).use { it.moveToFirst(); if (it.getLong(0) != captured.key.generation) conflict("staleExecution") }
+            db.rawQuery("SELECT payload,result FROM commands WHERE id=?", arrayOf(captured.commandId)).use {
+                val encoded = encode(mapOf("method" to captured.method, "arguments" to captured.payload))
+                if (!it.moveToFirst() || it.getString(0) != encoded) conflict("commandPayloadChanged")
+                if (!it.isNull(1)) conflict("commandAlreadyCompleted")
+            }
+            db.rawQuery("SELECT finished,stop,engine,generation,version FROM worker_authorizations WHERE command_id=?", arrayOf(material.commandId)).use {
+                if (!it.moveToFirst() || it.getInt(0) != 1 || (!it.isNull(1) && it.getString(1) == "cancel") ||
+                    it.getString(2) != captured.key.engineId || it.getLong(3) != captured.key.generation ||
+                    it.getLong(4) != material.receiptVersion || material.receiptVersion != current.first) conflict("restartRequired")
+            }
+            if (inspectResume(captured.key) != material) conflict("restartRequired")
+        }
+        transaction { db ->
+            validate(db)
+            db.rawQuery("SELECT command_id FROM recovery_attempts WHERE command_id=?", arrayOf(captured.commandId)).use {
+                if (it.moveToFirst()) conflict("commandOutcomeUnknown")
+            }
+        }
+        return ResumeTransfer(privateRoot, material, { id, candidate ->
+            transaction { db ->
+                validate(db)
+                NativeMaterialPaths.validate(privateRoot, candidate, false)
+                if (candidate.name != "$id.part") conflict("materialOwnership")
+                db.rawQuery("SELECT phase FROM recovery_attempts WHERE command_id=? AND source_ref=?", arrayOf(captured.commandId, ref)).use {
+                    if (!it.moveToFirst() || it.getString(0) != "requested") conflict("commandOutcomeUnknown")
+                }
+                db.execSQL("INSERT INTO recovery_operations(id,resume_command,source_ref,candidate,phase) VALUES(?,?,?,?,?)", arrayOf(id, captured.commandId, ref, candidate.path, "copying"))
+                db.execSQL("UPDATE recovery_attempts SET phase='candidate' WHERE command_id=?", arrayOf(captured.commandId))
+            }
+        }, { id ->
+            transaction { db ->
+                validate(db)
+                db.rawQuery("SELECT phase FROM recovery_operations WHERE id=? AND resume_command=? AND source_ref=?", arrayOf(id, captured.commandId, ref)).use {
+                    if (!it.moveToFirst() || it.getString(0) != "copying") conflict("commandOutcomeUnknown")
+                }
+                db.execSQL("UPDATE recovery_operations SET phase='staged' WHERE id=?", arrayOf(id))
+            }
+        }, {
+            transaction { db ->
+                validate(db)
+                db.execSQL("INSERT INTO recovery_attempts(command_id,source_ref,phase) VALUES(?,?,'requested')", arrayOf(captured.commandId, ref))
+            }
+        })
+    }
+
+    /** Native diagnostic ownership, never creates/resumes/deletes a candidate. */
+    fun inspectRecoveries(key: ExecutionKey): List<Map<String, Any?>> = transaction { db ->
+        execution(db, key) ?: conflict("staleExecution")
+        db.rawQuery("SELECT o.id,o.resume_command,o.source_ref,o.candidate,o.phase FROM recovery_operations o JOIN resume_checkpoints r ON r.ref=o.source_ref JOIN materials m ON m.command_id=r.command_id WHERE m.task=? AND m.engine=? AND m.generation=? ORDER BY o.id", arrayOf(key.taskId, key.engineId, key.generation.toString())).use { rows ->
+            buildList {
+                while (rows.moveToNext()) add(mapOf("operationId" to rows.getString(0), "commandId" to rows.getString(1), "sourceRef" to rows.getString(2), "candidate" to rows.getString(3), "phase" to rows.getString(4)))
+            }
+        }
     }
 
     /** Diagnostic ownership intents; non-destructive and never an enqueue/recovery source. */
@@ -362,6 +475,9 @@ internal class ExecutionJournal(
                 "UPDATE worker_authorizations SET version=?,finished=? WHERE command_id=?",
                 arrayOf<Any>(version, if (finished) 1 else 0, command.commandId),
             )
+            // Associate the existing force-certified prefix with this receipt without
+            // promoting its offset to the (possibly unforced) progress byte count.
+            db.execSQL("UPDATE resume_checkpoints SET receipt_version=? WHERE command_id=? AND offset<=?", arrayOf<Any>(version, command.commandId, checkpoint.downloadedBytes))
             receipt
         }
 
