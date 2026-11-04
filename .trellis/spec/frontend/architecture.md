@@ -4,7 +4,7 @@
 
 下载管理器页面数量有限，但下载生命周期、任务恢复和文件访问必须独立于页面。采用按功能组织目录、MVVM 式职责划分及 Repository/Service 分层；Riverpod 管理界面状态与依赖，复杂业务按需提取 UseCase。
 
-该分层决策已确认；领域/执行 DTO、DownloadEngine 与 FileStorage 接口及 AppStore v1 已实现，现有 API 与验证范围见[持久化契约](persistence.md)。PluginEngine 与固定插件补丁已接入，桌面局部验证见[插件执行契约](plugin-engine.md)；AndroidEngine 的 Dart 桥接已通过主机独立检查，但 Repository、Android 原生传输和用户文件操作仍待实现。插件子任务尚未完成平台验收，当前 macOS 运行结果不能代表 iOS/Windows/最低版本通过。
+该分层决策已确认；领域/执行 DTO、DownloadEngine 与 FileStorage 接口及 AppStore v1 已实现，现有 API 与验证范围见[持久化契约](persistence.md)。PluginEngine 与固定插件补丁已接入，桌面局部验证见[插件执行契约](plugin-engine.md)；AndroidEngine 的 Dart 桥接、新下载 Service/Coordinator/HttpTransfer 生产调用链已通过主机局部独立检查；Repository、安全续传和用户文件操作仍待实现，Android 设备验收未通过。插件子任务尚未完成平台验收，当前 macOS 运行结果不能代表 iOS/Windows/最低版本通过。
 
 平台范围为必需支持 Android、macOS、Windows，并争取同步提供 iOS。共享业务接口不能绑定 Android 专用通道或数据库；优先复用跨平台实现，仅在平台边界适配执行、目录和文件打开。iOS 系统托管后台任务例外已获用户确认：关联既有任务并同步状态，不主动重新提交失败或取消任务；用户强制退出按系统取消行为处理。具体跨平台方案见 [设计文档](../../../.agents/specs/download-manager/design.md)，其技术选型仍须通过设计审核及平台验证。
 
@@ -161,103 +161,86 @@ Future<void> pause(String taskId) async {
 - 存储：AppStore v1 与确认行已落库；插件独立执行日志不写业务表，确认必须核对实际业务提交。用户目录发布恢复未实现；提供方不支持安全恢复时报能力错误，不假定所有 URI/文件身份稳定。
 - 依赖与发布：sqlite3 3.5.2、path_provider 2.1.6、固定 9.5.9 path 插件已解析锁定；Riverpod 与目录选择仍待接入。macOS release/iOS 无签名构建仅在临时 host 目标 12/15 编译通过，仓库 10.15/14 仍未验证，Windows 未构建。业务功能铺开前须关闭设计所列安全门槛。
 
-## Android 首轮协议/日志检查点（局部通过，非完整引擎）
+## Android 执行协议、Service 与私有暂存（主机局部通过）
 
 ### 1. Scope / Trigger
 
-适用于 AndroidEngineChannels、EngineProtocol、ExecutionJournal 及 Dart AndroidEngine 调用方。协议与 Dart 桥接已通过局部检查；2026-11-04 材料门独立复核通过 JVM 19项（协议5＋HTTP14）及实际 Kotlin 编译。六项 Android SQLite instrumentation 仅编译，尚未设备运行；服务集成、安全续传及设备生命周期仍未实现或未验收。
+适用于 AndroidEngine、AndroidEngineChannels、ExecutionJournal、ServiceLifecycle、TransferCoordinator、DownloadService 和 HttpTransfer 的命令、持久执行及停止边界。2026-11-04 独立续审源码局部 PASS：44项 JVM、102项 Dart、flutter analyze 和实际 debug APK 构建通过。11项 Android SQLite instrumentation 仅编译；真实 Service/SQLite/通道及 API29/30/33/35/36 设备矩阵仍 BLOCK，完整任务不得勾选或归档。
 
 ### 2. Signatures
 
-通道为 `downloader/android_engine` 和 `downloader/android_engine/events`，所有请求含 `protocolVersion=1`。inspect 请求仅版本，返回 `{protocolVersion,ownerSessionId,sequence,receipts}`；当前无事件生产者，sequence=0。命令携带扁平执行键、commandId、ownerSessionId、expectedReceiptVersion；enqueue 额外使用 `input=EngineTask.toJson()`，嵌套 key 必须匹配。ack 使用扁平执行键、receiptVersion 和 releaseResumeRefs。
-
-日志入口：`register(command,session)`、`newTransfer(command,session): HttpTransfer`、`registerMaterials(command,session,payload,facts)`、`inspectMaterials(key)`、`complete(command,session,checkpoint)`、`inspect()`、`acknowledge(ack)`；独立 `android_execution_v1.db` 的 user_version=2，包含 executions/commands/receipts/materials，不打开 AppStore。
+- 通道固定为 `downloader/android_engine`、`downloader/android_engine/events`，请求均含 `protocolVersion=1`。`inspect` 只携带版本，返回 `{protocolVersion,ownerSessionId,sequence,receipts}`，空集合也返回当前会话。事件有当前会话、单调 sequence 和完整回执。
+- enqueue/pause/resume/cancel 携带扁平 taskId/engineId/generation、commandId、ownerSessionId、expectedReceiptVersion；enqueue 另传 `input=EngineTask.toJson()`，嵌套 key 必须匹配。ack 为扁平执行键、receiptVersion、releaseResumeRefs。不会把内部嵌套命令 JSON 原样当通道命令。
+- 日志入口：`register(command,session)`、`acceptWorker(command,session)`、`newTransfer(command,session,allocation)`、`registerMaterials(command,session,payload,facts)`、`inspectMaterials(key)`、`workerReceipt(command,session,checkpoint,finished)`、`stopWorker(worker,command,session,checkpoint)`、`finishWorker(command,session,checkpoint,pause)`、`inspect()`、`acknowledge(ack)`；既有 `complete` 保留旧命令路径。
+- 独立 `android_execution_v1.db` 的 user_version=3；表为 executions、commands、receipts、materials、worker_authorizations，不打开共享 AppStore。
+- ServiceLifecycle：`issue(stop)`、`pending(token,action)`、`foreground(token,instance,action)`、`ready(token,instance)`、`worker(token,action)`、`revoke(token)`、`idle()`、`stop(ticket,action)`、`destroy(instance,action)`；token 和实例归属只在当前进程有效，不从数据库重建调度。
+- `HttpTransfer(appFiles: File, authorizedUrl: String? = null, onAllocation: (ExecutionKey,File,File) -> Unit).run(key,url,stop,onSample): Staged`；Sample 为 bytes:Long、total:Long?、monotonicMs:Long，Staged 为 file、bytes、total、effectiveUrl、stop、sha256。`Stop.request(PAUSE|CANCEL)` 只发布停止请求。
 
 ### 3. Contracts
 
-- 进程随机会话和串行队列独立于 Activity；detach 只解除通道，不触发传输。inspect 非破坏。
-- SQLite 写事务原子登记执行身份与 NULL 未知命令结果；complete 原子分配递增回执并保存命令结果。相同 commandId/规范化载荷回放，不同载荷拒绝；NULL 结果不自动重执行。
-- 原生 ack 仅验证已有回执/身份/高水位，当前拒绝全部显式材料释放并保守留历史。Dart AndroidEngine 还需先核对 AppStore 已提交的完整确认和现存同版本业务回执；确认期间重读任务与回执，不能仅信任调用参数。
-- 原生类型验证只接受 Int/Long 计数，拒绝负数、未知版本、控制字符、非法名称及不匹配嵌套 key。材料定位形态校验不等于路径归属授权。
-- v1→v2 只新增 materials(command_id PRIMARY KEY、task、engine、generation、payload_path UNIQUE、facts_path UNIQUE)，分别外键引用 command 和 execution；完整归属仍在事务内核验。SQLiteOpenHelper 同事务迁移及更新 user_version，失败保留 v1 历史，不支持的版本拒绝，不删库重建。
-- `newTransfer` 深复制并重新解析完整命令，固定授权 URL；run 在建立目录前拒绝更换 URL。分配事务重查会话、完整 pending 命令/result=NULL、完整执行键、最新代次及期望版本，验证 UUID 双文件和私有父目录；一个 command 只能登记一次，既有意图不能授权重下。
-- materials 意图提交后才创建 facts/part 和请求网络；`inspectMaterials` 只读归属，不授予恢复、删除或重传权。分配后的 stop/终态竞争须由后续 Service 单执行协调队列解决，当前没有生产调度入口。
-- 真实 SQLite 事务/版本/磁盘故障尚待设备验证；回滚失败附加到原异常，绝不删库重建。
+#### 执行日志与材料授权
 
-### Android Dart 桥接补充
+- 进程随机会话、单协调队列不依赖 Activity；detach 只解绑监听。命令深复制并重新解析，固定完整执行键、commandId、会话、期望版本及 URL。原生只接受 Int/Long 计数，拒绝负数、未知版本、控制字符、非法名称和嵌套身份不匹配。
+- register 原子登记执行及 NULL 未知命令结果；acceptWorker 同事务保存 queued 接受结果及 worker_authorizations。不可变 enqueue 结果与后续递增 worker 事实分离；同 commandId/规范化载荷重放，不同载荷拒绝。未知 NULL 结果不是重跑 HTTP 的许可。
+- v1→v3 在保留旧三表/历史的基础上新增 materials 和 worker_authorizations；v2→v3 仅新增后者。SQLiteOpenHelper 同事务迁移 DDL 与 user_version，不支持的版本拒绝，失败保留数据库，不删库重建。回滚失败不覆盖首异常。
+- materials 以 command_id 为主键，保存完整执行归属和唯一 payload/facts 私有路径；外键引用命令和执行。worker_authorizations 以 enqueue command_id 为主键，保存 session、engine、generation、version、allocated、stop、finished；完整命令和 task 归属仍在事务内核验，不能仅信任外键。
+- newTransfer 捕获完整命令/授权 URL；run 在建目录前拒绝 URL 替换。分配事务重查命令载荷、当前会话/执行/代次、授权版本、未停止/未完成及未消费条件，再消费一次性分配权并登记材料；旧 pending 路径仍要求 result=NULL，旧库命令不自动升级为 worker 权限。一个命令不能二次分配，即使原文件不存在也不能重下。
+- 原生 Context.filesDir 是唯一私有根，不使用 Dart staging 路径授权；拒绝根别名和 symlink 暂存目录。先提交 UUID 双文件归属，后以 CREATE_NEW+NOFOLLOW_LINKS 排他创建 facts/part，再请求网络；失败保留材料。空 staging 目录可能先存在，不授予恢复/删除权。私有 sandbox 排除同 UID 恶意写入者，未承诺完全 TOCTOU 安全或目录项 fsync。
+- worker、stop、终态及暂停结果在同一事务核对完整命令、会话、执行键、最新代次/版本、pending/finished 条件；持久 cancel 不可被 pause、running 或 publishing 撤销。终态 checkpoint 与暂停命令结果同事务提交，成功结果丢失后同 checkpoint 重试不再分配版本，不同 checkpoint 拒绝。
+- inspect/inspectMaterials 非破坏，不安排网络、不清理材料；facts 仅诊断，不能凭文件存在推定完成/可恢复/可删除。原生 ack 仅核对已有回执/归属/高水位，普通确认保留材料，当前所有非空 releaseResumeRefs 仍拒绝。
 
-- `AndroidEngine.open(store: ...)` 仅在 Android 打开；主机测试通过 `isAndroid` 注入，不改变生产平台判断。MethodChannel/EventChannel 使用固定名称和 `protocolVersion=1`。
-- 命令使用扁平执行键，`enqueue` 保留完整 `input=EngineTask.toJson()`；`enqueue/resume` 接受原生持久命令结果，`pause/cancel` 必须校验回执执行键、状态和版本。
-- 事件在首次业务订阅前按顺序缓冲；只有显式成功 `inspect` 才允许更新会话/序号基线，事件本身不能授权换会话。旧 inspect 的迟到结果不能覆盖较新的同步。
-- `acknowledge` 在发送原生确认前读取真实 AppStore 确认行，并对现存同版本业务回执与非破坏 `inspect` 结果做完整比较；inspect 期间再次读取任务和回执，冲突时不发送确认。原生拒绝材料释放时，业务行保持不变。
-- 主机 messenger fake 与 sqlite3 测试证明桥接边界，不证明 Android 原生 SQLite、服务/HTTP、真实通道或设备验收。
+#### Service 生命周期与停止
+
+- 生产链为 Dart AndroidEngine → 通道 → 进程串行 Coordinator → 当前进程 token → DownloadService → 最多两个 HttpTransfer worker → SQLite → EngineEvent；同执行最多一个 worker。只有显式本进程用户命令可调度；inspect、重连、进程启动、空/旧/重复 Intent 和未知结果不得创建网络请求。
+- Manifest 声明 INTERNET、FOREGROUND_SERVICE、FOREGROUND_SERVICE_DATA_SYNC、POST_NOTIFICATIONS；Service exported=false、foregroundServiceType=dataSync、START_NOT_STICKY，无 boot receiver、WorkManager 或自动网络重试。按需求允许明文 HTTP，HTTPS 保持默认证书验证。API<26 拒绝服务；候选最低 API29 未因本轮修改。
+- Runtime 与 Service 共用同一 ServiceLifecycle；token、实例、ready、idle epoch 在短同步临界区核验，实际 startService/startForeground、worker 提交和 idle stopSelf 按同一归属执行。启动动作抛错立即同步撤销 grant，不等待日志队列；失败前台启动立即安排 epoch 约束的 idle 停止。
+- 新 enqueue 使旧 idle 票据失效；destroy/timeout 只失效所属实例 grant，并先发布所属 worker 停止标志，后排日志保存。退休实例不绑定新授权且给出明确失败，不自动重新调度。timeout 整体退休所属实例时无参 stopSelf()；无效/重复 Intent 只按 startId 停止不属于当前 owner 的实例，不误停有效新请求。
+- 生命周期锁内不访问 SQLite、不等待 Future 或网络退出。标准启动/通知/停止 IPC 的设备延迟尚未验证；不能以短临界区假设替代平台证据。
+- Stop 原子优先级 CANCEL>PAUSE；disconnect 在独立 daemon 池执行且不持 Stop/Lifecycle 锁，attach 后重查 stop。系统停止标志不排在可能阻塞的日志队列后；用户 pause/cancel 仍先持久意图再发信号。标志可见不保证平台 connect/headers/read 立即退出。
+- pause Future 必须等真实 run 退出、payload/facts force/close 和终态提交后才成功，失败 pause 重放仍失败。取消先持久 cancelling 再停止；清理未实现时返回 cleanupFailure 并保留材料，不能虚报任务已移除。ready 前已停止的 enqueue Future 也必须确定结束。
+- running/进度/终态持久后才 emit，sequence 会话内递增，事件消费者异常不能回滚已持久操作。完整私有暂存只到 publishing，未完成目标发布不能 completed。
+
+#### 终态补存、HTTP 与 Dart 边界
+
+- 终态落库失败保留冻结 Work.terminal、完整命令和材料，active=false 释放 worker 槽；inspect 明确报 persistenceFailure/terminalSavePending，不伪造快照版本或隐式补存。显式重发原完整 enqueue/pause 仅重试本地 finish，不创建 worker/HTTP；变化身份/会话/版本/载荷拒绝，并发同命令补存串行且幂等。
+- 已持久 cancel 的相同完整重放，即使终态仍待补存，也保持原 cleanupFailure，不借 cancel 隐式补存或改成 commandOutcomeUnknown。进程 kill 后内存终态丢失，只承认已持久事实，不从 facts 猜测完成。
+- HTTP identity、连接15s/读取30s，最多10跳、每跳重新校验无认证 http/https 和 visited 循环检测；新下载只接受200，严格验证编码、Content-Length 和已知长度 EOF。64KiB 缓冲、64位计数、未知 total=null、独立单调字节样本、增量 SHA-256；周期 force 最多每秒，不全文件重扫。
+- StageFailure/Failure 保留 JOURNAL/NETWORK/HTTP/FILE 阶段、稳定 code、首 cause 及 suppressed 关闭错误；非200/redirect/编码/长度为 httpFailure，SocketTimeout 为 timeout，其他网络为 networkUnavailable，Journal 为 persistenceFailure，文件为 fileWriteFailure。不得通过匹配原始异常字符串分类。fileUse 确保 Staged 返回前实际关闭；关闭失败不能认证 paused/staged。最终 disconnect 仍是 run 屏障的一部分。
+- 输出关闭后固定一次停止原因，facts 与返回使用同一快照；之后的取消由 Coordinator 按持久意图协调，不回改冻结事实。安全 Range/验证器/prefix/candidate 续传未实现，resume 明确 restartRequired，不打开旧 partial 或发 HEAD/Range。
+- AndroidEngine.open(store:) 仅 Android；isAndroid 是主机测试注入。事件在首个业务订阅前顺序缓冲；仅显式成功 inspect 同步会话/序号，迟到旧 inspect 不覆盖新基线。Dart 不生成或重绑命令身份，不自动 enqueue/resume/retry。
+- acknowledge 先读取真实 AppStore 完整 ReceiptAck，对现存同版本业务回执与非破坏 inspect 的完整载荷比较；await 后重读确认及任务再比较，冲突不发送 ack，不删除业务行。错误只放行稳定 code/reason，中文信息不泄露路径或原始 PlatformException；主机 fake 不证明真实平台通道。
 
 ### 4. Validation & Error Matrix
 
 | 条件 | 当前行为 |
 | --- | --- |
-| 未知方法/版本/类型/非法输入 | protocolMismatch |
-| 旧会话、执行键、版本或改 commandId 载荷；worker 更换 URL | stateConflict，并保留结构化 reason；URL 更换在目录/材料创建前拒绝 |
-| 非 pending 命令、重复材料分配或非私有 UUID 双文件 | 拒绝分配，不创建材料或请求网络；未知分配保留供查询 |
-| 传输方法通过解析和会话检查 | stateConflict / transferUnavailable；无伪造网络或暂停成功 |
-| 非空 releaseResumeRefs | stateConflict / materialReleaseUnavailable；不推进水位、不删文件 |
-| SQLite/JSON 失败 | persistenceFailure；保留原生诊断，不伪造空快照 |
+| 未知协议/方法/类型、非法输入 | protocolMismatch；不调度 |
+| 旧会话/执行/版本、commandId 载荷变化或替换 URL | stateConflict，结构化 reason；拒绝副作用 |
+| 材料分配无授权、重复分配、非私有 UUID 双文件 | 拒绝材料和网络，保留已登记未知意图 |
+| 旧/空/重复启动令牌、退休 Service 实例 | 不启动 worker；明确拒绝有效新请求的启动失败，不自动重排 |
+| 终态写失败或仍待本进程补存 | persistenceFailure/terminalSavePending；保留完整终态，显式原 enqueue/pause 只补存 |
+| HTTP 状态/重定向/编码/长度异常 | httpFailure；保留实际材料，不虚报 staged |
+| 网络断开/超时、写入/force/close、日志失败 | networkUnavailable/timeout、fileWriteFailure、persistenceFailure；不虚报暂停成功 |
+| 通知权限拒绝、后台启动受限、系统 timeout/destroy | permissionDenied 或 backgroundRestricted 等稳定失败；先停止授权、再保存受影响任务，保留材料；通知请求 UI 未实现 |
+| cancel 清理未实现；请求 resume；非空 releaseResumeRefs | cleanupFailure；restartRequired；materialReleaseUnavailable，均不假成功或删除材料 |
 
 ### 5. Good/Base/Bad Cases
 
-- Good：已登记且已完成命令以同载荷重放，返回原不可变回执。
-- Base：空 inspect 返回当前会话、0 序号和空集合，不安排网络。
-- Bad：直接转发嵌套 Dart 命令、旧会话或未提交业务确认，不得伪造成已接受传输或可释放材料。
+- Good：旧 idle 已排队，新 enqueue 进入后旧票据失效，旧 destroy 只影响旧实例；终态补存只落日志、HTTP 数不增长，同版本结果不重复分配。
+- Base：空 inspect 返回会话/sequence/空回执而不网络；重复完整 commandId 重放；未知总长在 EOF 前持续增字节，总长和派生比例保持未知。
+- Bad：SQLite 队列阻塞时系统停止仍须即时发布标志；disconnect 阻塞不延迟 CANCEL 优先级；关闭/落库失败不能返回 paused，取消回放不能变更已提交结果。
 
 ### 6. Tests Required
 
-独立 Gradle `:app:testDebugUnitTest :app:compileDebugAndroidTestKotlin` 通过；JVM 19项（协议5＋HTTP14）无失败、错误或跳过。六项 SQLite instrumentation 覆盖重开/确认、回滚/竞争、材料登记/拒绝、v1→v2迁移及失败保留历史，但没有设备运行，不能计通过；新增可变输入隔离、同 worker 重用和迟到旧代次断言亦仅编译。Dart 未改，本轮沿用先前顺序复跑 flutter analyze 干净及 flutter test 94/94（基础48＋桥接46），不声称重跑。后续补真实通道/重连、未知库版本/磁盘错误、材料释放、服务及 API29/30/33/35/36 生命周期矩阵。
+独立 Gradle `:app:testDebugUnitTest :app:compileDebugAndroidTestKotlin :app:assembleDebug` 正常退出、debug APK 构建成功；44项 JVM（协议5＋HTTP17＋Coordinator15＋Lifecycle7）零失败/错误/跳过；顺序 flutter analyze 干净及 flutter test 102/102。日志 `/tmp/android-service-recheck-{gradle,analyze,flutter}.log`。
+
+- 生产 Lifecycle/Stop/Coordinator 确定性回调/latch：旧 idle/new enqueue/旧 destroy、新旧实例、启动失败立即撤权、foreground/ready 间失效、同实例多个 start 的 timeout、阻塞断连与取消优先。
+- 真实 loopback HTTP/文件：最多两个 worker、未知长度、持久后事件、幂等命令、失败 pause、cancel 优先、终态保存失败不饿死其他下载、显式补存无新 HTTP、提交结果丢失/并发补存/身份变化；Journal 为 host fake，不能称真实 Android SQLite。
+- HTTP 覆盖短EOF/编码/长度/redirect、阻塞读取停止、路径/symlink/sentinel、分配先于网络和 URL 固定；typed phase、生产 fileUse helper 关闭故障不替代真实设备磁盘 force/close。大长度测试仅声明4294967419而实际5字节，不是超过4GiB传输。
+- 11项 SQLite instrumentation 覆盖重开、确认、并发/回滚、迁移/未知版本、完整 worker 授权、cancel/终态幂等，但仅 Kotlin 编译，未运行 connectedDebugAndroidTest。后续必须执行 API29/30/33/35/36 的 Service、通知/后台限制、timeout、Activity 重连、强杀重开零 HTTP、TLS、SQLite/磁盘故障和真实大文件；目录 fsync、续传与材料清理仍待实施/验收。
 
 ### 7. Wrong vs Correct
 
-错误：把 `EngineCommand.toJson()` 的嵌套 key 原样发送，或将原生 ack 当作已证明业务提交。
+错误：`stopService(globalIntent)` 排入主线程后不验证新授权，旧 onDestroy 全局停止；或 `stop.request(PAUSE); emitPaused()`；或保存失败后删除 Work 并重跑下载。
 
-正确：显式映射扁平通道字段并保留完整执行身份；Dart 对照 AppStore 实际持久确认，再发送 ack；传输未实现保持明确错误，设备未测保持未验收。
-
-## Android HTTP 私有暂存核心（主机局部通过，尚未接服务）
-
-### 1. Scope / Trigger
-
-适用于 [HttpTransfer](../../../android/app/src/main/kotlin/com/example/downloader/downloader/HttpTransfer.kt) 及其后续原生 Service 调用方。当前仅有测试调用方，通道仍 transferUnavailable；不能将核心测试通过当作可用 AndroidEngine。
-
-### 2. Signatures
-
-`HttpTransfer(appFiles: File, authorizedUrl: String? = null, onAllocation: (ExecutionKey,File,File) -> Unit).run(key: ExecutionKey, url: String, stop: Stop, onSample: (Sample) -> Unit): Staged`；onAllocation 必须显式提供，生产仅通过 `ExecutionJournal.newTransfer(command,session)` 注入，测试才使用诊断 no-op。Sample 含 bytes:Long、total:Long?、monotonicMs:Long。Staged 含 file、bytes、total、effectiveUrl、stop:Stop.Reason?、sha256。`Stop.request(PAUSE|CANCEL)` 只请求停止；`resume()` 明确抛 stateConflict/restartRequired。
-
-### 3. Contracts
-
-- 根目录只能由原生 Context.filesDir 注入，拒绝 Dart 路径授权、根别名与 symlink 暂存目录。固定命令/URL后，先在 ExecutionJournal 提交 UUID facts/part 归属，再以 CREATE_NEW+NOFOLLOW_LINKS 排他创建；先 force 身份意图再创建 payload，不打开旧 partial、不覆盖现有文件。登记失败不创建双文件或请求网络，空 staging 目录可已存在。依赖私有 sandbox 排除恶意同 UID 目录替换，不声称完全 TOCTOU 安全。
-- 默认 HTTPS 校验；HTTP identity、15s连接/30s读取、最多10跳重定向，每跳重新校验无认证 http/https 并检测循环。仅新下载200；已知长度严格验证，未知长度仍发真实累计字节。64KiB流缓冲、增量 SHA-256，周期 force 至多每秒，不重扫全文件。
-- request 返回不是停止屏障；调用方等待 run 真正退出及 force/close 成功，再提交 ExecutionJournal 回执。输出关闭后固定一次终态停止原因，facts 与返回使用同一快照；晚到取消由 Service 的取消优先意图协调。取消目前只停止保留，不代表清理成功。
-- facts 仅为诊断材料，不是持久恢复证明。原生日志已提供分配意图门，但没有生产 worker/事件/服务；目录 fsync/重启归属、安全 Range/prefix/candidate 恢复及受控释放仍待实现。staged 只表示完整私有暂存，未发布用户目标。
-
-### 4. Validation & Error Matrix
-
-| 条件 | 当前核心行为 |
-| --- | --- |
-| 非法根/暂存别名或 symlink | 拒绝，不触碰外部已有文件 |
-| 非法跳转、非200、编码/长度异常、短EOF | 异常并保留实际材料，不返回 staged |
-| 读被停止中断 | 等待输入/输出关闭及终态facts保存后返回停止结果 |
-| force/close/消费者回调失败 | 异常，不虚报暂停或暂存成功 |
-| 请求续传 | restartRequired，不打开或修改原件 |
-
-### 5. Good/Base/Bad Cases
-
-- Good：未知长度正文在EOF前持续增字节；实际阻塞读取被跨线程停止，run退出后材料与关闭facts一致。
-- Base：两次新下载分配不同私有文件；完整暂存不等同于用户目录发布。
-- Bad：晚到PAUSE不能让facts记staged而返回PAUSE；CANCEL请求返回不能视作已清理。
-
-### 6. Tests Required
-
-独立 Gradle 编译及JUnit19项（协议5＋HTTP14）通过，新增登记失败零材料/零请求、分配先于真实HTTP、URL替换零分配回归。[真实Socket测试](../../../android/app/src/test/kotlin/com/example/downloader/downloader/HttpTransferTest.kt)覆盖字节/散列、未知长度、重定向、短EOF、编码/长度异常、真实阻塞停止、symlink与sentinel、连接失败和消费者异常。本轮无 Dart 改动，未重复先前已通过的 analyze/94项 Dart 测试。大长度仅声明4294967419、实际5字节，不是超过4GiB传输证明。Android TLS、连接/响应头阻塞停止、force/close故障、目录fsync/重启恢复及设备矩阵尚未验证；后续服务集成须独立验证。
-
-### 7. Wrong vs Correct
-
-错误：`stop.request(PAUSE); emitPaused()`，或以facts/part存在推断可恢复、已发布。
-
-正确：请求停止 → 等待worker真实退出/关闭 → 按串行用户意图协调终态 → 提交持久执行回执 → 交付；取消另需归属清理，发布另走FileStorage协议。
+正确：按实例/token/idle epoch 重验实际启动与停止 → 用户意图先持久（系统紧急停止先发标志）→ 等真实 worker 退出/关闭 → 按取消优先冻结终态 → 事务保存不可变回执 → 交付；补存失败保留入口，只重试原本地提交，设备未测保持未验收。

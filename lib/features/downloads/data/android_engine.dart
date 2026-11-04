@@ -75,6 +75,13 @@ final class AndroidEngine implements DownloadEngine {
         'stateConflict' => FailureCode.stateConflict,
         'persistenceFailure' => FailureCode.persistenceFailure,
         'protocolMismatch' => FailureCode.protocolMismatch,
+        'permissionDenied' => FailureCode.permissionDenied,
+        'backgroundRestricted' => FailureCode.backgroundRestricted,
+        'cleanupFailure' => FailureCode.cleanupFailure,
+        'fileWriteFailure' => FailureCode.fileWriteFailure,
+        'networkUnavailable' => FailureCode.networkUnavailable,
+        'httpFailure' => FailureCode.httpFailure,
+        'timeout' => FailureCode.timeout,
         _ => FailureCode.protocolMismatch,
       };
       final details = error.details;
@@ -89,6 +96,20 @@ final class AndroidEngine implements DownloadEngine {
             ? '执行记录读取或保存失败'
             : code == FailureCode.stateConflict
             ? '执行状态已变化，请同步后重试'
+            : code == FailureCode.permissionDenied
+            ? '请允许下载通知后重试'
+            : code == FailureCode.backgroundRestricted
+            ? '系统限制了后台下载，已保留执行记录'
+            : code == FailureCode.cleanupFailure
+            ? '下载已请求停止，材料清理尚未完成'
+            : code == FailureCode.fileWriteFailure
+            ? '下载材料写入或关闭失败'
+            : code == FailureCode.httpFailure
+            ? '服务器响应或下载内容校验失败'
+            : code == FailureCode.networkUnavailable
+            ? '网络不可用，已保留下载材料'
+            : code == FailureCode.timeout
+            ? '下载连接超时，已保留下载材料'
             : 'Android 执行协议不可用或载荷无效',
         details: reason == null ? null : {'reason': reason},
       ),
@@ -106,6 +127,8 @@ final class AndroidEngine implements DownloadEngine {
     'receiptVersionExhausted',
     'invalidPayload',
     'unknownMethod',
+    'restartRequired',
+    'terminalSavePending',
   };
 
   Never _conflict(String reason) => throw AndroidEngineException(

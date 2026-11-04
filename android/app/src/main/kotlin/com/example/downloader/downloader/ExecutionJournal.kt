@@ -10,7 +10,7 @@ import org.json.JSONObject
 internal class ExecutionJournal(
     context: Context,
     name: String = "android_execution_v1.db",
-) : SQLiteOpenHelper(context.applicationContext, name, null, 2) {
+) : SQLiteOpenHelper(context.applicationContext, name, null, 3) {
     private val privateRoot = context.applicationContext.filesDir.canonicalFile
 
     override fun onConfigure(db: SQLiteDatabase) {
@@ -27,6 +27,7 @@ internal class ExecutionJournal(
             "CREATE TABLE receipts (engine TEXT NOT NULL, generation INTEGER NOT NULL, version INTEGER NOT NULL CHECK(version>0), payload TEXT NOT NULL, PRIMARY KEY(engine,generation,version), FOREIGN KEY(engine,generation) REFERENCES executions(engine,generation))",
         )
         createMaterials(db)
+        createWorkers(db)
     }
 
     override fun onUpgrade(
@@ -36,10 +37,17 @@ internal class ExecutionJournal(
     ) {
         // SQLiteOpenHelper wraps this migration and user_version update in one transaction.
         // Never rewrite the v1 tables or discard an old database on failure.
-        if (oldVersion != 1 || newVersion != 2) {
+        if (oldVersion !in 1..2 || newVersion != 3) {
             throw EngineProtocolException("protocolMismatch", "journalVersion")
         }
-        createMaterials(db)
+        if (oldVersion == 1) createMaterials(db)
+        createWorkers(db)
+    }
+
+    private fun createWorkers(db: SQLiteDatabase) {
+        db.execSQL(
+            "CREATE TABLE worker_authorizations (command_id TEXT PRIMARY KEY NOT NULL REFERENCES commands(id), session TEXT NOT NULL, engine TEXT NOT NULL, generation INTEGER NOT NULL, version INTEGER NOT NULL, allocated INTEGER NOT NULL DEFAULT 0, stop TEXT, finished INTEGER NOT NULL DEFAULT 0, FOREIGN KEY(engine,generation) REFERENCES executions(engine,generation))",
+        )
     }
 
     private fun createMaterials(db: SQLiteDatabase) {
@@ -54,18 +62,21 @@ internal class ExecutionJournal(
     fun newTransfer(
         command: NativeCommand,
         session: String,
+        allocation: (() -> Unit) -> Unit = { it() },
     ): HttpTransfer {
         // Copy nested input now: a caller retaining mutable codec maps cannot reauthorize run.
         val captured = EngineProtocol.command(command.method, decode(encode(command.payload)))
         if (captured.commandId != command.commandId || captured.key != command.key ||
             captured.ownerSessionId != command.ownerSessionId ||
             captured.expectedReceiptVersion != command.expectedReceiptVersion
-        ) conflict("commandPayloadChanged")
+        ) {
+            conflict("commandPayloadChanged")
+        }
         if (captured.method != "enqueue") conflict("materialAllocationUnavailable")
         val url = EngineProtocol.string(EngineProtocol.map(captured.payload["input"]), "url")
         return HttpTransfer(privateRoot, url) { key, payload, facts ->
             if (key != captured.key) conflict("staleExecution")
-            registerMaterials(captured, session, payload, facts)
+            allocation { registerMaterials(captured, session, payload, facts) }
         }
     }
 
@@ -81,7 +92,20 @@ internal class ExecutionJournal(
         if (command.ownerSessionId != session) conflict("staleSession")
         if (command.method != "enqueue") conflict("materialAllocationUnavailable")
         val current = execution(db, command.key) ?: conflict("staleExecution")
-        if (current.first != command.expectedReceiptVersion) conflict("staleReceipt")
+        var worker = false
+        db
+            .rawQuery(
+                "SELECT session,version,allocated,stop,finished FROM worker_authorizations WHERE command_id=?",
+                arrayOf(command.commandId),
+            ).use {
+                if (it.moveToFirst()) {
+                    worker = true
+                    if (it.getString(0) != session) conflict("staleSession")
+                    if (it.getLong(1) != current.first) conflict("staleReceipt")
+                    if (it.getInt(2) != 0 || !it.isNull(3) || it.getInt(4) != 0) conflict("materialAllocationUnknown")
+                }
+            }
+        if (!worker && current.first != command.expectedReceiptVersion) conflict("staleReceipt")
         db.rawQuery("SELECT MAX(generation) FROM executions WHERE task=?", arrayOf(command.key.taskId)).use {
             it.moveToFirst()
             if (it.getLong(0) != command.key.generation) conflict("staleExecution")
@@ -89,7 +113,7 @@ internal class ExecutionJournal(
         val encoded = encode(mapOf("method" to command.method, "arguments" to command.payload))
         db.rawQuery("SELECT payload,result FROM commands WHERE id=?", arrayOf(command.commandId)).use {
             if (!it.moveToFirst() || it.getString(0) != encoded) conflict("commandPayloadChanged")
-            if (!it.isNull(1)) conflict("commandAlreadyCompleted")
+            if (!worker && !it.isNull(1)) conflict("commandAlreadyCompleted")
         }
         val directory = java.io.File(privateRoot, "http_staging_v1")
         val id = payload.name.removeSuffix(".part")
@@ -107,6 +131,7 @@ internal class ExecutionJournal(
         ) {
             conflict("materialOwnership")
         }
+        if (worker) db.execSQL("UPDATE worker_authorizations SET allocated=1 WHERE command_id=?", arrayOf(command.commandId))
         // One allocation per command; even a prior attempt with no file must be inspected,
         // never used as permission to allocate another file and restart a transfer.
         db.rawQuery("SELECT command_id FROM materials WHERE command_id=?", arrayOf(command.commandId)).use {
@@ -231,6 +256,173 @@ internal class ExecutionJournal(
                 arrayOf<Any>(version, key.engineId, key.generation),
             )
             db.execSQL("UPDATE commands SET result=? WHERE id=?", arrayOf(payload, command.commandId))
+            receipt
+        }
+
+    /** Called only by the process coordinator after register returned a new pending command. */
+    fun acceptWorker(
+        command: NativeCommand,
+        session: String,
+    ): Map<String, Any?> =
+        transaction { db ->
+            if (command.ownerSessionId != session || command.method != "enqueue") conflict("staleSession")
+            val receipt = complete(command, session, NativeCheckpoint("queued", 0, null))
+            db.execSQL(
+                "INSERT INTO worker_authorizations(command_id,session,engine,generation,version) VALUES(?,?,?,?,?)",
+                arrayOf<Any>(command.commandId, session, command.key.engineId, command.key.generation, receipt["receiptVersion"] as Long),
+            )
+            receipt
+        }
+
+    /** Revalidate the immutable command and its live authorization inside the caller transaction. */
+    private fun workerStop(
+        db: SQLiteDatabase,
+        command: NativeCommand,
+        session: String,
+    ): String? {
+        if (command.method != "enqueue" || command.ownerSessionId != session) conflict("staleSession")
+        val current = execution(db, command.key) ?: conflict("staleExecution")
+        val payload = encode(mapOf("method" to command.method, "arguments" to command.payload))
+        db.rawQuery("SELECT payload,result FROM commands WHERE id=?", arrayOf(command.commandId)).use {
+            if (!it.moveToFirst() || it.getString(0) != payload) conflict("commandPayloadChanged")
+            if (it.isNull(1)) conflict("commandOutcomeUnknown")
+        }
+        db.rawQuery("SELECT MAX(generation) FROM executions WHERE task=?", arrayOf(command.key.taskId)).use {
+            it.moveToFirst()
+            if (it.getLong(0) != command.key.generation) conflict("staleExecution")
+        }
+        return db
+            .rawQuery(
+                "SELECT session,engine,generation,version,finished,stop FROM worker_authorizations WHERE command_id=?",
+                arrayOf(command.commandId),
+            ).use {
+                if (!it.moveToFirst() || it.getString(0) != session) conflict("staleSession")
+                if (it.getString(1) != command.key.engineId || it.getLong(2) != command.key.generation) conflict("staleExecution")
+                if (it.getLong(3) != current.first || it.getInt(4) != 0) conflict("staleReceipt")
+                if (it.isNull(5)) null else it.getString(5)
+            }
+    }
+
+    fun stopWorker(
+        worker: NativeCommand,
+        command: NativeCommand,
+        session: String,
+        checkpoint: NativeCheckpoint,
+    ): Map<String, Any?> =
+        transaction { db ->
+            val priorStop = workerStop(db, worker, session)
+            if (command.key != worker.key || command.method !in setOf("pause", "cancel")) conflict("staleExecution")
+            if (priorStop == "cancel") conflict("commandOutcomeUnknown")
+            val encoded = encode(mapOf("method" to command.method, "arguments" to command.payload))
+            db.rawQuery("SELECT payload,result FROM commands WHERE id=?", arrayOf(command.commandId)).use {
+                if (!it.moveToFirst() || it.getString(0) != encoded) conflict("commandPayloadChanged")
+                if (!it.isNull(1)) conflict("commandAlreadyCompleted")
+            }
+            if (checkpoint.state != (if (command.method == "cancel") "cancelling" else "running")) conflict("invalidPayload")
+            val receipt =
+                if (command.method == "cancel") {
+                    complete(command, session, checkpoint)
+                } else {
+                    val current = execution(db, command.key) ?: conflict("staleExecution")
+                    if (command.ownerSessionId != session) conflict("staleSession")
+                    if (current.first != command.expectedReceiptVersion) conflict("staleReceipt")
+                    mapOf("receiptVersion" to current.first)
+                }
+            db.execSQL(
+                "UPDATE worker_authorizations SET stop=?,version=? WHERE command_id=? AND session=? AND finished=0",
+                arrayOf<Any>(command.method, receipt["receiptVersion"] as Long, worker.commandId, session),
+            )
+            receipt
+        }
+
+    /** Appends a worker fact without changing the immutable enqueue result. */
+    fun workerReceipt(
+        command: NativeCommand,
+        session: String,
+        checkpoint: NativeCheckpoint,
+        finished: Boolean = false,
+    ): Map<String, Any?> =
+        transaction { db ->
+            val current = execution(db, command.key) ?: conflict("staleExecution")
+            val stop = workerStop(db, command, session)
+            if (stop == "cancel" && checkpoint.state != "cancelling") conflict("stateConflict")
+            if (stop == "pause" && checkpoint.state !in setOf("paused", "failed")) conflict("stateConflict")
+            if (current.first == Long.MAX_VALUE) conflict("receiptVersionExhausted")
+            val version = current.first + 1
+            val receipt = checkpoint.receipt(command.key, version)
+            db.execSQL(
+                "INSERT INTO receipts(engine,generation,version,payload) VALUES(?,?,?,?)",
+                arrayOf<Any>(command.key.engineId, command.key.generation, version, encode(receipt)),
+            )
+            db.execSQL(
+                "UPDATE executions SET version=? WHERE engine=? AND generation=?",
+                arrayOf<Any>(version, command.key.engineId, command.key.generation),
+            )
+            db.execSQL(
+                "UPDATE worker_authorizations SET version=?,finished=? WHERE command_id=?",
+                arrayOf<Any>(version, if (finished) 1 else 0, command.commandId),
+            )
+            receipt
+        }
+
+    fun finishWorker(
+        command: NativeCommand,
+        session: String,
+        checkpoint: NativeCheckpoint,
+        pause: NativeCommand?,
+    ): Map<String, Any?> =
+        transaction { db ->
+            // A commit can succeed while its caller loses the result. Retry only the exact
+            // stopped checkpoint, never grant another worker or allocate another version.
+            val encodedCommand = encode(mapOf("method" to command.method, "arguments" to command.payload))
+            if (command.ownerSessionId != session || command.method != "enqueue") conflict("staleSession")
+            db.rawQuery("SELECT payload,result FROM commands WHERE id=?", arrayOf(command.commandId)).use {
+                if (!it.moveToFirst() || it.getString(0) != encodedCommand) conflict("commandPayloadChanged")
+                if (it.isNull(1)) conflict("commandOutcomeUnknown")
+            }
+            var finishedVersion: Long? = null
+            db
+                .rawQuery(
+                    "SELECT session,engine,generation,version,finished FROM worker_authorizations WHERE command_id=?",
+                    arrayOf(command.commandId),
+                ).use {
+                    if (!it.moveToFirst() || it.getString(0) != session) conflict("staleSession")
+                    if (it.getString(1) != command.key.engineId || it.getLong(2) != command.key.generation) conflict("staleExecution")
+                    if (it.getInt(4) != 0) finishedVersion = it.getLong(3)
+                }
+            if (finishedVersion != null) {
+                execution(db, command.key) ?: conflict("staleExecution")
+                val expected = checkpoint.receipt(command.key, finishedVersion!!)
+                db
+                    .rawQuery(
+                        "SELECT payload FROM receipts WHERE engine=? AND generation=? AND version=?",
+                        arrayOf(command.key.engineId, command.key.generation.toString(), finishedVersion.toString()),
+                    ).use {
+                        if (!it.moveToFirst() || it.getString(0) != encode(expected)) conflict("receiptPayload")
+                    }
+                if (pause != null) {
+                    if (pause.method != "pause" || pause.key != command.key || pause.ownerSessionId != session) conflict("staleExecution")
+                    val encoded = encode(mapOf("method" to pause.method, "arguments" to pause.payload))
+                    db.rawQuery("SELECT payload,result FROM commands WHERE id=?", arrayOf(pause.commandId)).use {
+                        if (!it.moveToFirst() || it.getString(0) != encoded || it.isNull(1) ||
+                            it.getString(1) != encode(expected)
+                        ) {
+                            conflict("commandPayloadChanged")
+                        }
+                    }
+                }
+                return@transaction expected
+            }
+            val receipt = workerReceipt(command, session, checkpoint, true)
+            if (pause != null) {
+                if (pause.method != "pause" || pause.key != command.key || pause.ownerSessionId != session) conflict("staleExecution")
+                val encoded = encode(mapOf("method" to pause.method, "arguments" to pause.payload))
+                db.rawQuery("SELECT payload,result FROM commands WHERE id=?", arrayOf(pause.commandId)).use {
+                    if (!it.moveToFirst() || it.getString(0) != encoded) conflict("commandPayloadChanged")
+                    if (!it.isNull(1)) conflict("commandAlreadyCompleted")
+                }
+                db.execSQL("UPDATE commands SET result=? WHERE id=? AND result IS NULL", arrayOf(encode(receipt), pause.commandId))
+            }
             receipt
         }
 

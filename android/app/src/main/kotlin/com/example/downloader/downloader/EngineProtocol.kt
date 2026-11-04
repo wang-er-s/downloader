@@ -25,8 +25,7 @@ internal object EngineProtocol {
         field: String,
     ): String = (map[field] as? String)?.takeIf { validString(it) } ?: mismatch()
 
-    private fun validString(value: String): Boolean =
-        value.isNotBlank() && value.none { it.code < 32 || it.code in 127..159 }
+    private fun validString(value: String): Boolean = value.isNotBlank() && value.none { it.code < 32 || it.code in 127..159 }
 
     fun number(
         map: Map<String, Any?>,
@@ -161,9 +160,10 @@ internal data class NativeCheckpoint(
     val resumeSupport: String = "unknown",
     val resumeRef: String? = null,
     val stagingLocation: String? = null,
+    val error: Map<String, Any?>? = null,
 ) {
     init {
-        require(state in setOf("queued", "running", "paused", "waitingRecovery", "failed", "cancelling"))
+        require(state in setOf("queued", "running", "paused", "waitingRecovery", "failed", "cancelling", "publishing"))
         require(downloadedBytes >= 0 && (totalBytes == null || totalBytes >= 0))
         require(resumeSupport in setOf("unknown", "supported", "unsupported"))
         require(resumeRef == null || resumeRef.isNotBlank())
@@ -186,6 +186,6 @@ internal data class NativeCheckpoint(
             "stagingLocation" to stagingLocation,
             "publishOperation" to null,
             "publishedLocation" to null,
-            "error" to null,
+            "error" to error,
         )
 }

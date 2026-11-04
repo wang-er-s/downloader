@@ -111,3 +111,55 @@ flutter analyze、flutter test；在 android/ 下运行 ./gradlew :app:testDebug
 - 父代理核对自动修复后 ExecutionJournal.kt：额外变化仅 Kotlin 换行，完整命令深复制/URL固定与材料事务逻辑保持。再次执行 Gradle 单测及 AndroidTest Kotlin 编译，BUILD SUCCESSFUL（3s）；JUnit XML 协议5＋HTTP14，失败/错误/跳过均0，日志 `/tmp/android-material-parent-gradle.log`。先前误设 context-mode 超时的尝试无完成结果，不计通过。
 - 同步 frontend index/architecture 与源设计中的 v2 materials、分配前登记、固定命令/URL、测试数量及设备未测边界；验证链接、围栏、尾换行和 diff --check。检查点仅纳入四个 Kotlin 实现/测试文件、任务 design/implement、上述三份规范；排除既有 .pi 配置与 docs 图片。不归档，不勾 PRD。
 - 下一轮目标为真实 Service/协调器入口：捕获已校验当前会话命令，串行登记/终态、最多两活动 worker、已持久取消意图优先、pause 等待真实退出及持久回执、事件持久后交付；重开只读取，不重传。安全 resume 与受控材料释放未闭合前继续明确拒绝，不用伪成功补齐。
+
+## Service／协调器实施检查点（2026-11-04，未完整验收）
+
+- 生产调用链已接通：AndroidEngine MethodChannel → 进程串行TransferCoordinator → 当前进程一次性Service启动令牌 → exported=false/dataSync/START_NOT_STICKY DownloadService → 双HttpTransfer worker → ExecutionJournal → 主线程EngineEvent。Activity detach仅解除监听；inspect、旧/null Intent、重开日志均不调度。服务权限/启动拒绝及timeout有失败回执；POST_NOTIFICATIONS仍须用户授权，没有新增权限请求UI。低于API26显式拒绝，不改最低SDK。
+- 日志v3新增worker_authorizations；enqueue原接受结果不可变，分配在授权版本/会话/完整命令/最新代次/一次性消费/无stop检查后登记。worker事实独立推进版本，pause保存stop后等run实际退出、force/close及最终回执提交；cancel持久cancelling后停止，保留cleanupFailure及材料，不伪报清理完成。续传restartRequired、releaseResumeRefs拒绝、完整私有staged仅publishing。
+- 真实验证：android目录JAVA_HOME='/Applications/Android Studio.app/Contents/jbr/Contents/Home' ./gradlew -Pandroid.builder.sdkDownload=false :app:testDebugUnitTest :app:compileDebugAndroidTestKotlin :app:assembleDebug；最终日志/tmp/android-service-gradle-delivery.log。25项JVM通过（协议5/HTTP14/协调器6，零失败跳过）；8项真实SQLite instrumentation只编译，adb devices为空。debug APK构建不等于设备运行或发布签名验收。
+- 协调器测试使用真实Socket/HttpTransfer/文件，Journal为host fake：未知长度完整暂存、持久后事件、重放无重复请求、双worker上限及排队暂停；暂停真实run闸与cancel优先、unknown/旧会话/重建协调器零调度、落库失败不发事件。停止屏障用分配闸控制run，尚缺真实Android连接/响应头阻塞及磁盘force/close故障注入。新增SQLite生命周期/授权消费和v2迁移测试，未设备运行。
+- Dart最小配套新增4种Service错误分类及4项AppStore+messenger测试；顺序flutter analyze与flutter test通过（98项），日志/tmp/android-service-analyze-final2.log、/tmp/android-service-flutter-tests.log；通道fake不是设备通道验收。
+- 失败重跑：首次编译发现NativeCheckpoint的String暂存/error/publishing不匹配，修正内部checkpoint；首次新增协调器测试3项失败由macOS /var临时目录alias触发私有根拒绝，改测试canonicalFile后25项通过；Dart测试误调用fixture命令导致analyze失败，改用字段后analyze及98项通过。保留失败日志/tmp/android-service-gradle.log、/tmp/android-service-gradle-tests.log、/tmp/android-service-analyze-final.log。
+- 基线protected.json十文件hash完全匹配；591文件manifest除授权文件外无差异，新增文件在允许原生包/测试目录。未stage/commit/push/archive、未改task.json、未勾PRD。
+- 仍需独立检查v3事务及真实SQLite/服务生命周期/通道；验证权限拒绝、后台启动/timeout、Activity重连、强杀和进程重启零HTTP，尤其Service停止与紧邻新命令的竞争。安全Range/强验证器/prefix、目录fsync、恢复材料受控清理、用户目录发布、超过4GiB实传及API29/30/33/35/36设备矩阵仍未闭合。
+
+## Service／协调器独立检查（2026-11-04，本轮仍 BLOCK）
+
+- 已直接读取 check.jsonl 六项、PRD/design/implement 和570行源设计（分段完整读取），独立检查本轮12文件；旧frontend v2检查点不作为禁止新Service实现的要求。生产调用链确实接通，但不等于生命周期验收。
+- 修复 ExecutionJournal worker/stop/finish 原先仅部分校验授权的缺口：同事务核对不可变完整命令、会话、执行归属、最新代次/版本和finished；stop命令必须已登记且未完成；持久cancel不能被pause或publishing/running回执覆盖；最终pause结果核对完整命令。enqueue接受结果保持不可变。
+- 修复失败pause命令重放原先会直接成功返回failed/cancelling回执；现在仍以失败结束。修复事件消费者抛错导致持久接受后不启动/暂停结果矛盾；消费者错误诊断后由inspect重放。修复ServiceReady前已被pause/cancel的enqueue Future永久悬挂。新增具体Socket/UnknownHost/SocketTimeout及队列持久异常分类，Dart补networkUnavailable/timeout稳定映射且不转发原始消息。
+- 新增3项协调器JVM回归：真实loopback拒绝连接保留材料与网络分类、分配故障后pause重放保持失败、消费者抛错不阻断持久暂停/令牌处理/等待Future。Journal仍为host fake。新增2项真实SQLite instrumentation（完整命令及取消不可撤销、未知版本保历史）；加强v1迁移失败注入至第二DDL，断言第一DDL也回滚。合计10项仅编译，未运行。
+- 最终独立Gradle命令含testDebugUnitTest、compileDebugAndroidTestKotlin、assembleDebug通过，日志`/tmp/android-service-review-gradle-final.log`；JUnit XML 28项（协议5＋HTTP14＋协调器9），failures/errors/skipped均0。顺序flutter analyze与flutter test通过，100项，日志`/tmp/android-service-review-analyze-final.log`和`/tmp/android-service-review-flutter-final.log`。adb无连接设备，API29/30/33/35/36、真实SQLite/Service/通道均未设备验收。
+- 保留P1 BLOCK：idle回调无条件post stopService，紧邻新enqueue可使用同一Service后被旧停止/旧onDestroy的全局restrict终止；token在queue消费后跨主线程post，启动前未重新验证，serviceReady返回false仍可先置serviceActive。需要Service实例/启动授权代次与idle停止握手的生命周期协调重构，未用fake掩盖或声称修复。
+- 保留P1/P2 BLOCK：onTimeout/onDestroy的stop只能排在串行日志队列后，Stop.request内部同步disconnect且停止原因first-wins（既有HTTP核心禁止修改）；及时停止和cancel信号优先未证明。终态日志失败后finally移除内存work，数据库仍保留旧回执/材料，但没有终态保存重试入口。HTTP状态/长度/编码错误在核心中都是无类型IOException，仍可能归为fileWriteFailure；需要核心提供结构化阶段/错误，禁止按字符串判断。
+- 备份路径可访问，594文件manifest差异均在允许文件，protected.json十文件hash全部匹配；既有.pi两个修改和docs保留，暂存区为空。未stage/commit/push/archive、未改task.json/PRD/源规范/依赖或SDK。部分允许Kotlin文件被现有格式工具重排。
+- 下一步先关闭Service实例/idle-stop/token竞态及终态持久化失败的恢复入口，再运行真实SQLite instrumentation和设备生命周期矩阵；需另授权HTTP核心结构化错误及stop实现调整。安全续传、受控材料清理、目录fsync及用户目录发布仍未完成。局部修复测试PASS，本轮Service交付与完整Android引擎继续BLOCK，不勾完整验收。
+
+## 五项源码阻断修复检查点（2026-11-04，平台仍BLOCK）
+
+- 保留独立check的完整worker/stop/pause事务身份绑定、取消不可撤销、失败pause重放仍失败、ready前停止的accepted Future完成及事件消费者隔离。没有恢复旧版本。
+- A/B：新增并实际接入ServiceLifecycle统一进程token、实例、idle代次和ready状态。Runtime不再维护第二份token集合或serviceActive boolean；真正startService/startForeground/worker提交/idle stopSelf均受同一授权检查。idle票据过期不能停止新enqueue；destroy/timeout只失效所属实例授权，不全局restrict。重复/空/旧Intent不创建worker。已经退休的旧Service实例拒绝绑定新授权并给出可追踪启动失败；系统随后创建的新实例可绑定，旧destroy不触碰新实例。
+- C：HttpTransfer.Stop原子发布CANCEL>PAUSE，disconnect在独立daemon线程不持锁，attach后重查停止标志；系统timeout/destroy在排SQLite队列之前直接发布所属worker停止，实际网络是否及时中断仍依赖平台。user pause/cancel继续先持久stop意图再信号；Future成功仍需真实run退出/force/close及终态落库。
+- D：终态失败冻结并保留Work.terminal及完整材料定位，active=false，不占HTTP worker槽；inspect在本进程有待补存时明确persistenceFailure/terminalSavePending，不改库、不发网络或虚构版本。显式重发同一完整enqueue/pause命令只补本地finish，其他命令不重新授权HTTP。ExecutionJournal.finishWorker新增同checkpoint/命令的幂等已提交结果核对，涵盖提交成功但结果丢失；版本/载荷不同拒绝。进程kill后仍只承认已持久事实，不从facts猜测staged。取消仍cleanupFailure，不代表完成清理。
+- E：HttpTransfer按JOURNAL/NETWORK/HTTP/FILE阶段包typed错误，保留原cause与suppressed关闭错误；非200、redirect/编码/长度校验为httpFailure，网络/超时与fileWriteFailure/persistenceFailure分开。新增fileUse关闭门测试，关闭失败不能返回暂停/暂存成功。Dart最小新增httpFailure分类和terminalSavePending白名单；未改共享DTO/API/schema。
+- 最终验证：android目录JAVA_HOME='/Applications/Android Studio.app/Contents/jbr/Contents/Home' ./gradlew -Pandroid.builder.sdkDownload=false :app:testDebugUnitTest :app:compileDebugAndroidTestKotlin :app:assembleDebug通过，日志/tmp/android-service-fix-final2.log；40项JVM（协议5+HTTP17+协调器14+生命周期4），零失败/错误/跳过。11项真实SQLite instrumentation只编译，设备为空，未执行。
+- 新回归采用生产Lifecycle/Stop/Coordinator与确定的latch/回调：旧idle→新enqueue→旧destroy、新旧实例交错；post启动后取消/timeout；disconnect阻塞时CANCEL优先；真实loopback终态落库失败保留→显式本地重试→不增加HTTP且不变已提交版本；暂停终态补存；保存失败不饿死另一个真实HTTP；HTTP响应与真实文件打开/JOURNAL失败分类。Journal为host fake，fileClose故障为生产关闭helper注入，不冒充真实Android SQLite/磁盘force故障。
+- 顺序flutter analyze、flutter test通过，No issues found、102项测试；日志/tmp/android-service-fix-analyze.log、/tmp/android-service-fix-flutter.log。原生首次编译因fileUse非inline闭包内return失败，改为返回helper结果以确保关闭之后返回，随后所有原生检查正常退出。失败日志/tmp/android-service-fix-first.log保留。未安装SDK/改license/启AVD。
+- protected.json十文件hash匹配，594文件manifest除授权源码/测试/design外无差异；此implement记录为后续授权追加。git diff --check通过，暂存空；未stage/commit/push/archive、未改task.json/PRD。本轮以源码阻断修复检查点交接，仍需独立复核及实际Android Service/SQLite/权限/timeout/进程重启设备矩阵。安全续传、目录fsync、受控清理/发布及平台完整验收仍BLOCK，PRD保持未勾选。
+
+## A–E修复独立续审（2026-11-04，源码局部PASS／平台仍BLOCK）
+
+- 先读取当前implement.jsonl/check.jsonl各六项，再完整读取最新任务设计及implement新增段与实施报告；源设计与六项规范沿用上轮已完整读取且本轮不变的内容。独立复核全部本轮生产链及真实调用方，不以实施报告代替检查。
+- A/B最小追加修复：ServiceLifecycle.pending与foreground在实际Android启动动作抛错时立即撤销token，不等可能阻塞的日志队列；foreground失败的Service主线程立即安排带epoch的idle停止。DownloadService.onTimeout已退休整个实例，改用无参stopSelf停止该实例所有start请求，避免较旧startId无法停止较新start请求；旧实例不能停止新owner。新增3项确定性Lifecycle回归（启动失败立即撤权、foreground失败/新epoch、同实例多start退休），不声称设备执行。
+- D追加修复：已持久cancel返回cleanupFailure之后，若终态补存失败，重复同完整cancel原先会被pending分支改成stateConflict。现在保留cancel完整命令，pending期间仍重放原cleanupFailure，不修改已持久取消意图，不授权HTTP或隐式重试补存。新增回归覆盖初次取消、pending重放、enqueue显式本地补存及之后重放一致。加强已有pause补存测试：改expectedVersion/载荷/旧会话拒绝且不调用finish；两个同命令并发重试只得到同一持久结果。
+- 独立结论：源码范围A–E及本轮追加问题关闭，局部PASS，无剩余源码阻断。生命周期授权统一且不在主线程等待SQLite/worker；同一monitor内仅短平台启动/前台/停止IPC及worker提交，未发现反向锁等待。IPC平台延迟及真实Service回调顺序仍需设备验收。Stop原子CANCEL优先且disconnect不持锁，紧急实例停止先发布标志再排日志；pause仍等run退出、force/close与终态事务。终态补存不占worker槽、不重新run，进程kill丢失内存终态时仅认已持久事实。
+- 独立重跑完整Gradle命令（testDebugUnitTest、compileDebugAndroidTestKotlin、assembleDebug，既有JBR，sdkDownload=false）正常退出0，日志/tmp/android-service-recheck-gradle.log。JUnit XML 44项（protocol5+HTTP17+coordinator15+lifecycle7），零failure/error/skipped。顺序flutter analyze与flutter test正常退出0，No issues found、102项；日志/tmp/android-service-recheck-analyze.log、/tmp/android-service-recheck-flutter.log。11项SQLite instrumentation仍只编译，adb无设备，不记真实SQLite/Service设备通过。
+- 新备份android-service-final-review-h9ncrwui可访问；597文件manifest差异仅授权原生源码/测试及本任务design/implement，protected10全匹配，暂存区为空；既有.pi/docs保留。未stage/commit/push/archive、未改task.json/PRD/frontend/source specs/共享模型/非Android实现，未安装SDK/改license/启AVD。
+- 下一步由父代理同步正式规范并处理检查点提交；任务仍in_progress/PRD不勾。平台完整验收仍BLOCK：实际SQLite迁移与故障、Service/权限/timeout/主线程与强杀重开零HTTP、API29/30/33/35/36；安全Range/prefix续传、受控清理与发布、目录fsync、真实>4GiB仍未完成或未测。
+
+## Service 检查点规范同步与提交（2026-11-04）
+
+- 父代理读取完整续审报告，核对最终 DownloadService/ServiceLifecycle/TransferCoordinator：失败启动同步撤权、所属实例 timeout 无参 stopSelf、pending cancel 重放及冻结终态补存仍在自动格式化后的实际代码中。597文件审查基线仅7项允许差异，10项受保护文件hash一致，暂存空；JUnit XML为44项、错误/失败/跳过均0，独立最终Gradle/analyze/102项Dart日志正常退出。
+- 按 trellis-update-spec 判断，本轮引入跨通道执行、v3授权表、实例握手、停止优先级、持久后事件和终态本地补存，必须更新可执行规范。architecture.md合并更新Android七节契约，index.md及源设计状态同步生产调用链；共享AppStore v1/schema不变，旧v2材料门不再作为当前引擎状态。
+- 检查点提交范围仅本任务原生实现/manifest/测试、Dart桥接错误分类及测试、任务design/implement和三份规范；不包含既有.pi配置或docs图片，不改变task.json或完整PRD验收框。提交只保存已独立检查的局部成果，不归档、不增加父任务完成数。
+- 下一轮优先闭合安全续传：先建立持久验证器、认证偏移与原件保留材料协议，再接实际GET写前206/Range/强验证器核验和用户显式恢复，未知旧材料继续restartRequired；受控清理与真实设备矩阵仍是独立门槛。11项Android SQLite测试目前仅编译，不能因主机44/102或debug APK通过标为设备通过。

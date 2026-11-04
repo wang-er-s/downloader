@@ -14,9 +14,116 @@ import java.util.concurrent.Executors
 internal object AndroidEngineRuntime {
     val ownerSessionId: String = UUID.randomUUID().toString()
     val executor = Executors.newSingleThreadExecutor()
+    val main = Handler(Looper.getMainLooper())
+
+    val lifecycle = ServiceLifecycle()
+    private val services = mutableMapOf<String, DownloadService>()
+
+    fun attachService(
+        id: String,
+        service: DownloadService,
+    ) {
+        services[id] = service
+    }
+
+    fun detachService(id: String) {
+        services.remove(id)
+    }
+
+    fun stopIdle() {
+        val ticket = lifecycle.idle() ?: return
+        main.post { lifecycle.stop(ticket) { id -> services[id]?.stopSelf() } }
+    }
+
     private var journal: ExecutionJournal? = null
+    private var coordinator: TransferCoordinator? = null
+    private val listeners = mutableMapOf<Any, (Map<String, Any?>) -> Unit>()
+
+    fun listen(
+        owner: Any,
+        listener: (Map<String, Any?>) -> Unit,
+    ) {
+        listeners[owner] = listener
+    }
+
+    fun unlisten(owner: Any) {
+        listeners.remove(owner)
+    }
 
     fun journal(context: Context): ExecutionJournal = journal ?: ExecutionJournal(context).also { journal = it }
+
+    fun coordinator(context: Context): TransferCoordinator =
+        coordinator ?: run {
+            val app = context.applicationContext
+            val log = journal(app)
+            TransferCoordinator(
+                ownerSessionId,
+                executor,
+                object : TransferCoordinator.Journal {
+                    override fun register(command: NativeCommand) = log.register(command, ownerSessionId)
+
+                    override fun accept(command: NativeCommand) = log.acceptWorker(command, ownerSessionId)
+
+                    override fun transfer(command: NativeCommand) =
+                        log.newTransfer(command, ownerSessionId) { action ->
+                            val done = java.util.concurrent.CompletableFuture<Unit>()
+                            executor.execute {
+                                try {
+                                    action()
+                                    done.complete(Unit)
+                                } catch (error: Exception) {
+                                    done.completeExceptionally(error)
+                                }
+                            }
+                            done.get()
+                        }
+
+                    override fun stop(
+                        worker: NativeCommand,
+                        command: NativeCommand,
+                        checkpoint: NativeCheckpoint,
+                    ) = log.stopWorker(worker, command, ownerSessionId, checkpoint)
+
+                    override fun receipt(
+                        command: NativeCommand,
+                        checkpoint: NativeCheckpoint,
+                    ) = log.workerReceipt(command, ownerSessionId, checkpoint)
+
+                    override fun finish(
+                        command: NativeCommand,
+                        checkpoint: NativeCheckpoint,
+                        pause: NativeCommand?,
+                    ) = log.finishWorker(command, ownerSessionId, checkpoint, pause)
+                },
+                { token ->
+                    main.post {
+                        try {
+                            lifecycle.pending(token) {
+                                val intent = android.content.Intent(app, DownloadService::class.java).putExtra("token", token)
+                                if (android.os.Build.VERSION.SDK_INT >= 26) app.startForegroundService(intent) else app.startService(intent)
+                            }
+                        } catch (error: Exception) {
+                            executor.execute {
+                                coordinator(app).launchFailed(token, error)
+                            }
+                        }
+                    }
+                },
+                {
+                    stopIdle()
+                },
+                { value ->
+                    listeners.values.toList().forEach {
+                        it(value)
+                    }
+                },
+                { error -> Log.e("AndroidEngine", "Worker receipt persistence failed; retained previous facts", error) },
+                lifecycle,
+            ).also {
+                coordinator =
+                    it
+            }
+        }
 }
 
 internal class AndroidEngineChannels(
@@ -36,10 +143,11 @@ internal class AndroidEngineChannels(
                         when (call.method) {
                             "inspect" -> {
                                 EngineProtocol.request(call.arguments)
+                                AndroidEngineRuntime.coordinator(application).assertInspectable()
                                 mapOf(
                                     "protocolVersion" to 1,
                                     "ownerSessionId" to AndroidEngineRuntime.ownerSessionId,
-                                    "sequence" to 0L,
+                                    "sequence" to AndroidEngineRuntime.coordinator(application).sequence,
                                     "receipts" to AndroidEngineRuntime.journal(application).inspect(),
                                 )
                             }
@@ -51,8 +159,30 @@ internal class AndroidEngineChannels(
 
                             "enqueue", "pause", "resume", "cancel" -> {
                                 val command = EngineProtocol.command(call.method, call.arguments)
-                                if (command.ownerSessionId != AndroidEngineRuntime.ownerSessionId) conflict("staleSession")
-                                throw EngineProtocolException("stateConflict", "transferUnavailable")
+                                AndroidEngineRuntime.coordinator(application).command(command).whenComplete { value, failure ->
+                                    main.post {
+                                        val error = if (failure is java.util.concurrent.CompletionException) failure.cause else failure
+                                        when (error) {
+                                            null -> {
+                                                result.success(value)
+                                            }
+
+                                            is EngineProtocolException -> {
+                                                result.error(
+                                                    error.code,
+                                                    error.reason,
+                                                    mapOf("reason" to error.reason),
+                                                )
+                                            }
+
+                                            else -> {
+                                                Log.e("AndroidEngine", "Execution failed", error)
+                                                result.error("persistenceFailure", "Native execution failed", null)
+                                            }
+                                        }
+                                    }
+                                }
+                                return@execute
                             }
 
                             else -> {
@@ -85,16 +215,22 @@ internal class AndroidEngineChannels(
                         EngineProtocol.request(arguments)
                     } catch (error: EngineProtocolException) {
                         sink.error(error.code, error.reason, mapOf("reason" to error.reason))
+                        return
                     }
-                    // No worker is connected yet: no fabricated events or transfer completion.
+                    AndroidEngineRuntime.executor.execute {
+                        AndroidEngineRuntime.listen(this@AndroidEngineChannels) { value -> main.post { sink.success(value) } }
+                    }
                 }
 
-                override fun onCancel(arguments: Any?) = Unit
+                override fun onCancel(arguments: Any?) {
+                    AndroidEngineRuntime.executor.execute { AndroidEngineRuntime.unlisten(this@AndroidEngineChannels) }
+                }
             },
         )
     }
 
     fun detach() {
+        AndroidEngineRuntime.executor.execute { AndroidEngineRuntime.unlisten(this) }
         methods.setMethodCallHandler(null)
         events.setStreamHandler(null)
     }

@@ -36,28 +36,58 @@ internal class HttpTransfer(
         val sha256: String,
     )
 
+    enum class Phase { JOURNAL, NETWORK, HTTP, FILE }
+
+    class StageFailure(val phase: Phase, val code: String, cause: Exception) : IOException("transferStageFailure", cause)
+
     class Failure(
         val material: File,
         val bytes: Long,
         cause: Exception,
+        val code: String = "fileWriteFailure",
+        val phase: Phase = Phase.FILE,
     ) : IOException("transferFailed", cause)
 
-    /** request signals only. run returning is the actual stopped/closed barrier. */
-    class Stop {
-        enum class Reason { PAUSE, CANCEL }
-
-        @Volatile var reason: Reason? = null
-            private set
-        private var connection: HttpURLConnection? = null
-
-        @Synchronized fun request(value: Reason) {
-            if (reason == null) reason = value
-            connection?.disconnect()
+    private fun <T> at(phase: Phase, action: () -> T): T = try { action() } catch (error: Exception) {
+        if (error is StageFailure) throw error
+        val code = when (phase) {
+            Phase.JOURNAL -> "persistenceFailure"
+            Phase.HTTP -> "httpFailure"
+            Phase.FILE -> "fileWriteFailure"
+            Phase.NETWORK -> if (error is java.net.SocketTimeoutException) "timeout" else "networkUnavailable"
         }
+        throw StageFailure(phase, code, error)
+    }
 
-        @Synchronized internal fun attach(value: HttpURLConnection?) {
-            connection = value
-            if (reason != null) value?.disconnect()
+    internal fun <T : java.io.Closeable, R> fileUse(resource: T, action: (T) -> R): R {
+        var failure: Throwable? = null
+        try { return action(resource) } catch (error: Throwable) { failure = error; throw error }
+        finally {
+            try { at(Phase.FILE) { resource.close() } } catch (error: Exception) {
+                if (failure != null) failure.addSuppressed(error) else throw error
+            }
+        }
+    }
+
+    /** Atomic priority publication never waits for disconnect, including attach/request races. */
+    class Stop(private val disconnect: (HttpURLConnection) -> Unit = { it.disconnect() }) {
+        enum class Reason { PAUSE, CANCEL }
+        private val requested = java.util.concurrent.atomic.AtomicReference<Reason?>(null)
+        private val connection = java.util.concurrent.atomic.AtomicReference<HttpURLConnection?>(null)
+        val reason: Reason? get() = requested.get()
+        fun request(value: Reason) {
+            requested.updateAndGet { prior -> if (prior == Reason.CANCEL || value == Reason.CANCEL) Reason.CANCEL else Reason.PAUSE }
+            connection.get()?.let { value -> disconnectAsync(value) }
+        }
+        private fun disconnectAsync(value: HttpURLConnection) {
+            disconnects.execute { try { disconnect(value) } catch (_: Exception) { } }
+        }
+        internal fun attach(value: HttpURLConnection?) {
+            connection.set(value)
+            if (value != null && reason != null) disconnectAsync(value)
+        }
+        companion object {
+            private val disconnects = java.util.concurrent.Executors.newCachedThreadPool { action -> Thread(action, "download-disconnect").apply { isDaemon = true } }
         }
     }
 
@@ -72,7 +102,7 @@ internal class HttpTransfer(
         onSample: (Sample) -> Unit = {},
     ): Staged {
         if (authorizedUrl != null && url != authorizedUrl) conflict("commandPayloadChanged")
-        var current = checkedUrl(URI(url))
+        var current = at(Phase.HTTP) { checkedUrl(URI(url)) }
         val root = appFiles.absoluteFile
         require(root == root.canonicalFile && root.isDirectory) { "privateRootRequired" }
         val directory = File(root, "http_staging_v1")
@@ -91,97 +121,109 @@ internal class HttpTransfer(
         var total: Long? = null
         var active: HttpURLConnection? = null
         val digest = MessageDigest.getInstance("SHA-256")
+        var primaryFailure: Failure? = null
         try {
             // Register BOTH names before the first exclusive file creation or network request.
             // A failed transaction leaves no facts/payload and must not be retried implicitly.
-            onAllocation(key, file, journal)
-            FileChannel.open(journal.toPath(), CREATE_NEW, WRITE, NOFOLLOW_LINKS).use { facts ->
+            at(Phase.JOURNAL) { onAllocation(key, file, journal) }
+            return fileUse(at(Phase.FILE) { FileChannel.open(journal.toPath(), CREATE_NEW, WRITE, NOFOLLOW_LINKS) }) { facts ->
                 fun record(text: String) {
                     val buffer = ByteBuffer.wrap((text + "\n").toByteArray(Charsets.UTF_8))
-                    while (buffer.hasRemaining()) facts.write(buffer)
-                    facts.force(true)
+                    at(Phase.FILE) {
+                        while (buffer.hasRemaining()) facts.write(buffer)
+                        facts.force(true)
+                    }
                 }
 
                 fun hex(value: String) = value.toByteArray(Charsets.UTF_8).joinToString("") { "%02x".format(it) }
                 record("v1 intent $id ${hex(key.taskId)} ${hex(key.engineId)} ${key.generation} resume=unsupported")
-                FileChannel.open(file.toPath(), CREATE_NEW, WRITE, NOFOLLOW_LINKS).use { output ->
+                fileUse(at(Phase.FILE) { FileChannel.open(file.toPath(), CREATE_NEW, WRITE, NOFOLLOW_LINKS) }) { output ->
                     val seen = mutableSetOf<String>()
                     var redirects = 0
                     while (stop.reason == null) {
-                        if (!seen.add(current.normalize().toASCIIString())) throw IOException("redirectLoop")
-                        val connection = current.toURL().openConnection() as HttpURLConnection
+                        if (!seen.add(current.normalize().toASCIIString())) at(Phase.HTTP) { throw IOException("redirectLoop") }
+                        val connection = at(Phase.NETWORK) { current.toURL().openConnection() as HttpURLConnection }
                         active = connection
                         connection.instanceFollowRedirects = false
                         connection.connectTimeout = 15_000
                         connection.readTimeout = 30_000
                         connection.setRequestProperty("Accept-Encoding", "identity")
                         stop.attach(connection)
+                        if (stop.reason != null) break
                         val status =
                             try {
                                 connection.responseCode
                             } catch (error: IOException) {
-                                if (stop.reason != null) break else throw error
+                                if (stop.reason != null) break else at(Phase.NETWORK) { throw error }
                             }
                         if (status in listOf(301, 302, 303, 307, 308)) {
-                            if (++redirects > 10) throw IOException("tooManyRedirects")
-                            val location = connection.getHeaderField("Location") ?: throw IOException("missingLocation")
-                            current = checkedUrl(current.resolve(location))
-                            connection.disconnect()
+                            if (++redirects > 10) at(Phase.HTTP) { throw IOException("tooManyRedirects") }
+                            val location = connection.getHeaderField("Location") ?: at(Phase.HTTP) { throw IOException("missingLocation") }
+                            current = at(Phase.HTTP) { checkedUrl(current.resolve(location)) }
+                            at(Phase.NETWORK) { connection.disconnect() }
                             stop.attach(null)
                             continue
                         }
-                        if (status != 200) throw IOException("httpStatus:$status")
+                        if (status != 200) at(Phase.HTTP) { throw IOException("httpStatus:$status") }
                         val encoding = connection.getHeaderField("Content-Encoding")
-                        if (encoding != null && !encoding.equals("identity", true)) throw IOException("unexpectedEncoding")
+                        if (encoding != null && !encoding.equals("identity", true)) at(Phase.HTTP) { throw IOException("unexpectedEncoding") }
                         total =
                             connection.getHeaderField("Content-Length")?.let {
-                                if (!it.matches(Regex("[0-9]+"))) throw IOException("invalidLength")
-                                it.toLongOrNull() ?: throw IOException("invalidLength")
+                                if (!it.matches(Regex("[0-9]+"))) at(Phase.HTTP) { throw IOException("invalidLength") }
+                                it.toLongOrNull() ?: at(Phase.HTTP) { throw IOException("invalidLength") }
                             }
                         var checkpointAt = System.nanoTime()
-                        connection.inputStream.use { input ->
+                        at(Phase.NETWORK) { connection.inputStream.use { input ->
                             val buffer = ByteArray(64 * 1024)
                             while (stop.reason == null) {
                                 val count =
                                     try {
                                         input.read(buffer)
                                     } catch (error: IOException) {
-                                        if (stop.reason != null) break else throw error
+                                        if (stop.reason != null) break else at(Phase.NETWORK) { throw error }
                                     }
                                 if (count == -1) break
                                 if (count == 0) continue
                                 val next = Math.addExact(bytes, count.toLong())
-                                if (total != null && next > total!!) throw IOException("lengthExceeded")
+                                if (total != null && next > total!!) at(Phase.HTTP) { throw IOException("lengthExceeded") }
                                 val chunk = ByteBuffer.wrap(buffer, 0, count)
-                                while (chunk.hasRemaining()) output.write(chunk)
+                                at(Phase.FILE) { while (chunk.hasRemaining()) output.write(chunk) }
                                 digest.update(buffer, 0, count)
                                 bytes = next
                                 val now = System.nanoTime()
-                                onSample(Sample(bytes, total, now / 1_000_000))
+                                at(Phase.JOURNAL) { onSample(Sample(bytes, total, now / 1_000_000)) }
                                 if (now - checkpointAt >= 1_000_000_000L) {
-                                    output.force(true)
+                                    at(Phase.FILE) { output.force(true) }
                                     record("progress $bytes")
                                     checkpointAt = now
                                 }
                             }
-                        }
+                        } }
                         break
                     }
-                    if (stop.reason == null && total != null && bytes != total) throw IOException("shortEof")
-                    output.force(true)
+                    if (stop.reason == null && total != null && bytes != total) at(Phase.HTTP) { throw IOException("shortEof") }
+                    at(Phase.FILE) { output.force(true) }
                 }
                 // Output close/force must succeed before a stopped/staged record.
                 val hash = digest.digest().joinToString("") { "%02x".format(it) }
                 // Freeze the result at this boundary: a late request cannot change only the return value.
                 val terminalStop = stop.reason
                 record("closed ${terminalStop?.name ?: "staged"} $bytes ${total ?: "unknown"} $hash")
-                return Staged(file, bytes, total, current.toASCIIString(), terminalStop, hash)
+                Staged(file, bytes, total, current.toASCIIString(), terminalStop, hash)
             }
         } catch (error: Exception) {
-            throw Failure(file, bytes, error)
+            val typed = error as? StageFailure
+            val original = (typed?.cause as? Exception) ?: error
+            if (typed != null) typed.suppressed.forEach { original.addSuppressed(it) }
+            val failure = Failure(file, bytes, original, typed?.code ?: "fileWriteFailure", typed?.phase ?: Phase.FILE)
+            primaryFailure = failure
+            throw failure
         } finally {
-            active?.disconnect()
             stop.attach(null)
+            try { at(Phase.NETWORK) { active?.disconnect() } } catch (error: StageFailure) {
+                if (primaryFailure != null) primaryFailure.addSuppressed(error)
+                else throw Failure(file, bytes, error.cause as Exception, error.code, error.phase)
+            }
         }
     }
 

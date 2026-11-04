@@ -72,6 +72,57 @@ void main() {
     });
   }
 
+  for (final code in [
+    FailureCode.permissionDenied,
+    FailureCode.backgroundRestricted,
+    FailureCode.cleanupFailure,
+    FailureCode.fileWriteFailure,
+    FailureCode.httpFailure,
+    FailureCode.networkUnavailable,
+    FailureCode.timeout,
+  ]) {
+    test(
+      'native service ${code.name} is classified without leaking diagnostics',
+      () async {
+        respond = (_) => throw PlatformException(
+          code: code.name,
+          message: '/private/material-secret',
+          details: {'reason': 'materialReleaseUnavailable', 'path': '/secret'},
+        );
+        await expectLater(
+          engine.enqueue(f.command, input),
+          throwsA(failure(code, 'materialReleaseUnavailable')),
+        );
+        expect(store.readTasks(), isEmpty);
+      },
+    );
+  }
+
+  test(
+    'pending terminal save is inspectable as persistence failure and explicit retry keeps identity',
+    () async {
+      respond = (call) {
+        if (call.method == 'inspect') {
+          throw PlatformException(
+            code: 'persistenceFailure',
+            details: {'reason': 'terminalSavePending', 'path': '/secret'},
+          );
+        }
+        return null;
+      };
+      await expectLater(
+        engine.inspect(),
+        throwsA(failure(FailureCode.persistenceFailure, 'terminalSavePending')),
+      );
+      respond = (_) => null;
+      await engine.enqueue(f.command, input);
+      final request = calls.last.arguments as Map;
+      expect(request['commandId'], f.command.commandId);
+      expect(request['ownerSessionId'], f.command.ownerSessionId);
+      expect(store.readTasks(), isEmpty);
+    },
+  );
+
   setUp(() async {
     store = AppStore(sqlite3.openInMemory());
     calls = [];

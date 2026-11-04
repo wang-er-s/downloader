@@ -18,12 +18,12 @@ class ExecutionJournalTest : Instrumentation() {
     override fun onStart() {
         val output = Bundle()
         try {
-            for (test in listOf(::testHandshakePersistenceReplayAndAck, ::testIdentityPayloadAndRollback, ::testConcurrentAllocationGateAcrossConnections, ::testMaterialRegistrationAndClosedCheckpoint, ::testMaterialInsertFailureCreatesNothing, ::testV1MigrationAndFailurePreserveHistory)) {
+            for (test in listOf(::testHandshakePersistenceReplayAndAck, ::testIdentityPayloadAndRollback, ::testConcurrentAllocationGateAcrossConnections, ::testMaterialRegistrationAndClosedCheckpoint, ::testMaterialInsertFailureCreatesNothing, ::testV1MigrationAndFailurePreserveHistory, ::testWorkerLifecycleAndStopAuthorization, ::testV2MigrationPreservesUnknownCommands, ::testWorkerCommandBindingAndCancelCannotBeRevoked, ::testUnknownVersionPreservesHistory, ::testTerminalSaveRollbackAndIdempotentRetry)) {
                 name = "journal-test-${UUID.randomUUID()}.db"
                 journal = ExecutionJournal(targetContext, name)
                 try { test() } finally { journal.close() }
             }
-            output.putString("stream", "PASS 6 real Android SQLite tests")
+            output.putString("stream", "PASS 11 real Android SQLite tests")
             finish(Activity.RESULT_OK, output)
         } catch (error: Throwable) {
             output.putString("stream", error.stackTraceToString())
@@ -72,6 +72,66 @@ class ExecutionJournalTest : Instrumentation() {
             fail("accepted conflict")
         } catch (error: EngineProtocolException) {
             assertEquals(reason, error.reason)
+        }
+    }
+
+    fun testWorkerCommandBindingAndCancelCannotBeRevoked() {
+        val c = command()
+        journal.register(c, "s")
+        val accepted = journal.acceptWorker(c, "s")
+        val changed = c.copy(payload = c.payload + ("extra" to "changed"))
+        rejects("commandPayloadChanged") { journal.workerReceipt(changed, "s", NativeCheckpoint("running", 0)) }
+        assertEquals(listOf(accepted), journal.inspect())
+        val cancel = command("cancel", 1, method = "cancel")
+        journal.register(cancel, "s")
+        val cancelling = journal.stopWorker(c, cancel, "s", NativeCheckpoint("cancelling", 0))
+        rejects("stateConflict") { journal.workerReceipt(c, "s", NativeCheckpoint("publishing", 0)) }
+        val pause = command("pause", 2, method = "pause")
+        journal.register(pause, "s")
+        rejects("commandOutcomeUnknown") { journal.stopWorker(c, pause, "s", NativeCheckpoint("running", 0)) }
+        val terminal = journal.finishWorker(c, "s", NativeCheckpoint("cancelling", 0), null)
+        assertEquals("cancelling", terminal["state"])
+        assertEquals(cancelling, journal.register(cancel, "s"))
+        assertEquals(accepted, journal.register(c, "s"))
+    }
+
+    fun testTerminalSaveRollbackAndIdempotentRetry() {
+        val c = command()
+        journal.register(c, "s")
+        journal.acceptWorker(c, "s")
+        val pause = command("p", 1, method = "pause")
+        journal.register(pause, "s")
+        journal.stopWorker(c, pause, "s", NativeCheckpoint("running", 0))
+        val checkpoint = NativeCheckpoint("paused", 7)
+        journal.writableDatabase.execSQL("CREATE TRIGGER fail_terminal BEFORE INSERT ON receipts BEGIN SELECT RAISE(ABORT,'terminal injection'); END")
+        try { journal.finishWorker(c, "s", checkpoint, pause); fail("write must fail") }
+        catch (_: android.database.sqlite.SQLiteException) { }
+        assertEquals(1L, journal.inspect().single()["receiptVersion"])
+        rejects("commandOutcomeUnknown") { journal.register(pause, "s") }
+        journal.writableDatabase.execSQL("DROP TRIGGER fail_terminal")
+        val receipt = journal.finishWorker(c, "s", checkpoint, pause)
+        assertEquals(receipt, journal.finishWorker(c, "s", checkpoint, pause))
+        assertEquals(receipt, journal.register(pause, "s"))
+        rejects("receiptPayload") { journal.finishWorker(c, "s", NativeCheckpoint("paused", 8), pause) }
+        assertEquals(2, journal.inspect().size)
+    }
+
+    fun testUnknownVersionPreservesHistory() {
+        val c = command()
+        journal.register(c, "s")
+        val receipt = journal.complete(c, "s", NativeCheckpoint("paused", 5))
+        journal.writableDatabase.version = 99
+        journal.close()
+        journal = ExecutionJournal(targetContext, name)
+        try { journal.inspect(); fail("unknown version must fail") }
+        catch (_: android.database.sqlite.SQLiteException) { }
+        journal.close()
+        android.database.sqlite.SQLiteDatabase.openDatabase(targetContext.getDatabasePath(name).path, null, 0).use { db ->
+            assertEquals(99, db.version)
+            db.rawQuery("SELECT payload FROM receipts", null).use {
+                assertTrue(it.moveToFirst())
+                assertEquals(ExecutionJournal.encode(receipt), it.getString(0))
+            }
         }
     }
 
@@ -143,15 +203,17 @@ class ExecutionJournalTest : Instrumentation() {
         journal.register(c, "s")
         val receipt = journal.complete(c, "s", NativeCheckpoint("paused", 23))
         // Reconstruct exactly the three v1 tables with their committed history.
+        journal.writableDatabase.execSQL("DROP TABLE worker_authorizations")
         journal.writableDatabase.execSQL("DROP TABLE materials")
         journal.writableDatabase.version = 1
         journal.close()
         journal = ExecutionJournal(targetContext, name)
         assertEquals(receipt, journal.inspect().single())
-        assertEquals(2, journal.writableDatabase.version)
+        assertEquals(3, journal.writableDatabase.version)
         assertTrue(journal.inspectMaterials(c.key).isEmpty())
         assertEquals(receipt, journal.register(c, "s"))
-        // A conflicting table forces migration failure. Old user_version/history survive.
+        // Fail the SECOND DDL so rollback must undo the newly created materials table.
+        journal.writableDatabase.execSQL("DROP TABLE materials")
         journal.writableDatabase.version = 1
         journal.close()
         journal = ExecutionJournal(targetContext, name)
@@ -161,10 +223,48 @@ class ExecutionJournalTest : Instrumentation() {
         android.database.sqlite.SQLiteDatabase.openDatabase(targetContext.getDatabasePath(name).path, null, 0).use { db ->
             assertEquals(1, db.version)
             db.rawQuery("SELECT COUNT(*) FROM receipts", null).use { it.moveToFirst(); assertEquals(1, it.getInt(0)) }
-            db.execSQL("DROP TABLE materials")
+            db.rawQuery("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='materials'", null).use {
+                it.moveToFirst(); assertEquals(0, it.getInt(0))
+            }
+            db.execSQL("DROP TABLE worker_authorizations")
         }
         journal = ExecutionJournal(targetContext, name)
         assertEquals(receipt, journal.inspect().single())
+    }
+
+    fun testWorkerLifecycleAndStopAuthorization() {
+        val c = command()
+        journal.register(c, "s")
+        val accepted = journal.acceptWorker(c, "s")
+        assertEquals("queued", accepted["state"])
+        journal.workerReceipt(c, "s", NativeCheckpoint("running", 0))
+        val directory = java.io.File(targetContext.filesDir.canonicalFile, "http_staging_v1").apply { mkdirs() }
+        val id = UUID.randomUUID().toString()
+        val part = java.io.File(directory, "$id.part")
+        val facts = java.io.File(directory, "$id.facts")
+        journal.registerMaterials(c, "s", part, facts)
+        rejects("materialAllocationUnknown") { journal.registerMaterials(c, "s", part, facts) }
+        val version = journal.inspect().last()["receiptVersion"] as Long
+        val pause = command("p", version, method = "pause")
+        journal.register(pause, "s")
+        journal.stopWorker(c, pause, "s", NativeCheckpoint("running", 0))
+        val receipt = journal.finishWorker(c, "s", NativeCheckpoint("paused", 0), pause)
+        assertEquals(receipt, journal.register(pause, "s"))
+        assertEquals(accepted, journal.register(c, "s"))
+        assertEquals(1, journal.inspectMaterials(c.key).size)
+        rejects("staleReceipt") { journal.workerReceipt(c, "s", NativeCheckpoint("running", 0)) }
+    }
+
+    fun testV2MigrationPreservesUnknownCommands() {
+        val c = command()
+        journal.register(c, "s")
+        journal.writableDatabase.execSQL("DROP TABLE worker_authorizations")
+        journal.writableDatabase.version = 2
+        journal.close()
+        journal = ExecutionJournal(targetContext, name)
+        assertEquals(3, journal.writableDatabase.version)
+        rejects("commandOutcomeUnknown") { journal.register(c, "s") }
+        assertTrue(journal.inspect().isEmpty())
     }
 
     fun testHandshakePersistenceReplayAndAck() {

@@ -16,6 +16,74 @@ class HttpTransferTest {
     private fun root(): File = Files.createTempDirectory("http-core-test").toFile().canonicalFile
     private fun hash(bytes: ByteArray) = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 
+    @Test fun blockedDisconnectCannotDelayOrDowngradeCancelAndAttachRechecksStop() {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val stop = HttpTransfer.Stop { entered.countDown(); release.await(5, TimeUnit.SECONDS) }
+        val connection = object : java.net.HttpURLConnection(java.net.URL("http://127.0.0.1/")) {
+            override fun connect() = Unit
+            override fun disconnect() = Unit
+            override fun usingProxy() = false
+        }
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            stop.attach(connection)
+            stop.request(HttpTransfer.Stop.Reason.PAUSE)
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            executor.submit { stop.request(HttpTransfer.Stop.Reason.CANCEL) }.get(1, TimeUnit.SECONDS)
+            executor.submit { stop.request(HttpTransfer.Stop.Reason.PAUSE) }.get(1, TimeUnit.SECONDS)
+            assertEquals(HttpTransfer.Stop.Reason.CANCEL, stop.reason)
+            val attached = CountDownLatch(1)
+            val beforeAttach = HttpTransfer.Stop { attached.countDown() }
+            beforeAttach.request(HttpTransfer.Stop.Reason.CANCEL)
+            beforeAttach.attach(connection)
+            assertTrue(attached.await(5, TimeUnit.SECONDS))
+            assertEquals(HttpTransfer.Stop.Reason.CANCEL, beforeAttach.reason)
+        } finally { release.countDown(); executor.shutdownNow() }
+    }
+
+    @Test fun typedHttpNetworkJournalAndFileFailuresRemainDistinct() = server { server, base ->
+        server.createContext("/denied") { it.sendResponseHeaders(403, 0); it.close() }
+        server.createContext("/length") { it.responseHeaders.add("Content-Length", "bad"); it.sendResponseHeaders(200, 0); it.close() }
+        server.createContext("/redirect") { it.responseHeaders.add("Location", "file:///private/sentinel"); it.sendResponseHeaders(302, 0); it.close() }
+        val root = root()
+        try {
+            for (path in listOf("denied", "length", "redirect")) {
+                try { HttpTransfer(root) { _, _, _ -> }.run(key, "$base/$path"); fail(path) }
+                catch (error: HttpTransfer.Failure) {
+                    assertEquals("httpFailure", error.code)
+                    assertEquals(HttpTransfer.Phase.HTTP, error.phase)
+                    assertNotNull(error.cause)
+                }
+            }
+            try { HttpTransfer(root) { _, _, _ -> }.run(key, "http://127.0.0.1:1/"); fail() }
+            catch (error: HttpTransfer.Failure) { assertEquals("networkUnavailable", error.code) }
+            val original = java.io.IOException("private database detail")
+            try { HttpTransfer(root) { _, _, _ -> throw original }.run(key, "$base/denied"); fail() }
+            catch (error: HttpTransfer.Failure) { assertEquals("persistenceFailure", error.code); assertSame(original, error.cause) }
+            try { HttpTransfer(root) { _, payload, _ -> payload.mkdir() }.run(key, "$base/denied"); fail() }
+            catch (error: HttpTransfer.Failure) { assertEquals("fileWriteFailure", error.code); assertEquals(HttpTransfer.Phase.FILE, error.phase) }
+        } finally { root.deleteRecursively() }
+    }
+
+    @Test fun fileCloseFailureCannotReturnSuccessAndKeepsFirstFailure() {
+        val root = root()
+        try {
+            val worker = HttpTransfer(root) { _, _, _ -> }
+            val closeFailure = java.io.IOException("close")
+            val resource = java.io.Closeable { throw closeFailure }
+            try { worker.fileUse(resource) { "paused" }; fail("close failure returned success") }
+            catch (error: HttpTransfer.StageFailure) { assertEquals("fileWriteFailure", error.code); assertSame(closeFailure, error.cause) }
+            val first = java.io.IOException("first")
+            try { worker.fileUse(resource) { throw first }; fail() }
+            catch (error: java.io.IOException) {
+                assertSame(first, error)
+                assertEquals(1, error.suppressed.size)
+                assertEquals("fileWriteFailure", (error.suppressed.single() as HttpTransfer.StageFailure).code)
+            }
+        } finally { root.deleteRecursively() }
+    }
+
     @Test fun boundUrlCannotBeReplacedBeforeAllocation() {
         val root = root()
         var calls = 0

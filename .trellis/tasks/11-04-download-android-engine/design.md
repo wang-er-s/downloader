@@ -59,3 +59,27 @@ Stop.request(PAUSE/CANCEL)仅请求并disconnect；调用者须等待 run 真正
 独立复核修复 newTransfer 原先只绑定 key、允许 run 替换 URL 的缺口：工厂深复制并重新解析完整命令，固定授权 URL，run 在创建目录前拒绝替换 URL；材料事务仍在延迟执行时核验 pending/当前代次/版本，重复调用同一工厂回调不能再次分配。补充主机 URL 替换零分配测试，以及 instrumentation 的输入变更隔离、同 worker 重用和迟到旧代次拒绝断言。后者仅编译，未在设备运行。
 
 此门只保证分配事务当时的授权：登记提交与创建/网络之间仍需后续 Service 单执行协调队列，串行处理 stop 命令和终态；不能视作活动暂停、取消优先或重启恢复已验收。目录 fsync、prefix 认证、设备 SQLite/迁移故障实测均未完成；保留材料且无自动重试。独立 JVM 19项（协议5＋HTTP14）与 AndroidTest Kotlin 编译通过；PRD保持未勾选。
+
+## Service 生命周期扩展（本轮实施）
+
+独立日志v3新增worker_authorizations，以enqueue command为主键保存session、完整执行归属、一次性分配状态、当前回执版本与停止意图。接受enqueue的命令结果与worker授权分开：接受原子保存queued及授权；后续分配须核对完整命令、当前进程session、当前执行/代次、授权版本、无stop且未消费，再消费授权并登记材料。worker回执推进授权版本，不修改不可变enqueue结果；pause/cancel另登记命令与持久stop意图，最终回执与其命令结果共同提交。旧库pending命令保持原材料门，不自动升级为worker授权。
+
+进程串行协调队列排序调度/stop/worker终态；独立双worker池执行HTTP，分配和进度经队列落库。Service只消费当前进程显式enqueue产生的一次性启动令牌，Intent不含可重放命令；空/旧Intent不调度。pause等待真实run退出；cancel保持cancelling及cleanupFailure，材料不释放。安全续传、用户目录发布、受控清理仍拒绝，PRD保持未勾选。
+
+## Service 扩展独立检查边界
+
+worker事实、stop与pause结果现在在事务内完整核对命令/会话/执行键/最新代次/授权版本，取消stop不能回退为pause或发布；失败pause重放仍失败。事件订阅者失败不回滚持久操作，inspect可重放。ServiceReady前已停止的接受Future也有确定结束。具体socket/超时与队列持久错误采用类型分类，不匹配异常字符串。
+
+本轮Service仍BLOCK：idle stopService和新enqueue/旧Service.onDestroy存在竞争；token消费到主线程startForeground之间缺启动授权代次重验；需要实例化生命周期握手。timeout/destroy停止信号仍受日志队列和HttpTransfer同步disconnect约束，终态落库失败仍缺保存恢复入口。HTTP非200/响应校验无类型IOException的精确分类须后续核心扩展。28项JVM及100项Dart通过不替代10项仅编译的SQLite instrumentation和API29/30/33/35/36设备验收。完整PRD不勾选。
+
+## 五项阻断修复方案（2026-11-04）
+
+统一ServiceLifecycle管理当前进程token、实例及代次。同步短临界区跨主线程和协调队列重验实际启动/前台/worker授权，idle停止带代次且只stopSelf所属实例，destroy/timeout仅失效所属授权并立即发布停止标志。Stop以原子优先级发布CANCEL>PAUSE，disconnect独立执行且不持锁；不承诺平台连接立即中断。
+
+终态保存失败保留已停止checkpoint及固定命令，不占worker槽；同一enqueue/pause命令的显式重试只补本地日志提交，inspect仍纯读取且不生成虚假版本。进程终止则仅以已落库事实为准。HttpTransfer按journal/network/HTTP validation/file阶段保留typed code和原cause，文件关闭失败不能认证暂停或暂存。
+
+## 修复独立续审结论（2026-11-04）
+
+A–E源码局部通过。实际startService/startForeground抛错时同步撤销grant，foreground失败不等待日志队列即可安排epoch约束的idle停止；timeout退休整个所属实例并无参stopSelf，避免旧startId遗留该实例的较新请求。持久cancel在终态补存失败期间仍按完整命令重放原cleanupFailure，不撤销取消意图、不隐式重新运行HTTP。新增失败启动/多start实例/取消重放回归，补存拒绝身份变化及同命令并发结果一致。
+
+独立44项JVM、102项Dart及实际SDK编译/debug构建通过；11项SQLite instrumentation仅编译。没有剩余本轮源码阻断，设备Service回调/IPC延迟、SQLite、权限与timeout、强杀重开及平台矩阵仍BLOCK；安全续传、受控清理/发布、fsync和真实大文件未据此验收。完整PRD保持未勾选。
