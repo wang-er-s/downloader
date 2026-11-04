@@ -1173,8 +1173,9 @@ internal class ExecutionJournal(
                 while (it.moveToNext()) {
                     val envelope = decode(it.getString(3))
                     val owner = EngineProtocol.command(envelope["method"] as String, envelope["arguments"])
-                    val sourceMatches = !it.isNull(4) && it.getString(4) == key.taskId &&
-                        it.getString(5) == key.engineId && it.getLong(6) == key.generation
+                    val sourceMatches =
+                        !it.isNull(4) && it.getString(4) == key.taskId &&
+                            it.getString(5) == key.engineId && it.getLong(6) == key.generation
                     // Either edge associates this operation with the key. A conflicting edge
                     // must reject the entire snapshot, never silently omit a registered file.
                     if (owner.key != key && !sourceMatches) continue
@@ -1185,15 +1186,19 @@ internal class ExecutionJournal(
                     val facts = it.getString(2)
                     val resume = it.getString(7)
                     val source = it.getString(8)
-                    db.rawQuery(
-                        "SELECT resume_command,source_ref,facts_path FROM candidate_checkpoints WHERE operation_id=?",
-                        arrayOf(operation),
-                    ).use { proof ->
-                        if (proof.moveToFirst() && (proof.getString(0) != resume ||
-                                proof.getString(1) != source || proof.getString(2) != facts)) {
-                            conflict("materialOwnership")
+                    db
+                        .rawQuery(
+                            "SELECT resume_command,source_ref,facts_path FROM candidate_checkpoints WHERE operation_id=?",
+                            arrayOf(operation),
+                        ).use { proof ->
+                            if (proof.moveToFirst() && (
+                                    proof.getString(0) != resume ||
+                                        proof.getString(1) != source || proof.getString(2) != facts
+                                )
+                            ) {
+                                conflict("materialOwnership")
+                            }
                         }
-                    }
                     members.add(Triple("candidate:" + operation, it.getString(1), facts))
                 }
             }

@@ -125,3 +125,12 @@ v7 新增 cancel_cleanups 与 cancel_cleanup_members，保留 v1–v6 所有行�
 删除前整集合验证原生 canonical 私有根/父目录、UUID .part/.facts 配对、NOFOLLOW 普通文件及完整执行/来源归属；任一失败零删除。每成员删除后持久 done，已登记 missing 幂等，IO/持久失败保留未完意图，不宣称文件集合原子。清理完成后仍保留材料/证明历史行供诊断；持久 stop/retired 阻止迟到 callback 重新认证。
 
 非空 ack 分支继续保守拒绝：当前接口没有可由原生日志验证的发布完成证明，且没有独立的确认重下业务意图字段；不能把普通 paused/failed 或任意旧 ack 当清新材料授权。原生显式 cancel 意图提供本轮唯一释放入口；Dart 真实 AppStore 提交核对保持，原生不访问业务库。真实设备/完整 PRD 仍 BLOCK。
+
+
+## API37 SQLite runner 与夹具实际验证（2026-11-04）
+
+本轮将无依赖Instrumentation runner改为标准逐case start/pass/failure状态及20项总数；单项失败继续运行，原stack与关闭/loopback异常保留。正常finish只表示runner结束，验收依赖Gradle case状态与XML，不能将adb shell退出0或0 tests当通过。后台loopback异常归属当前case并等待线程退出，避免未捕获异常中止后续测试。
+
+生产授权门未改变：无worker的旧head命令仍先staleReceipt，取消checkpoint不从branch推导恢复能力；夹具分别改为现有门的精确错误并核对无副作用、显式传入Coordinator同款unsupported。网络sample没有固定read长度，测试达到8192/16384预定累计值才暂停，仍精确检查原offset及完整恢复断言。
+
+emulator-5554 API37最终实际执行20项Android SQLite，XML为20/0失败/0错误/0跳过，v1-v7迁移、回滚、归属和清理均在真实Android SQLite上执行。证据/tmp/android-sqlite-runtime-final.log（Gradle退出0）、final-results.xml；真实失败second/third日志与XML保留。完整API29/30/33/35/36真机矩阵、Service/通道及其他PRD边界仍BLOCK，不能因API37模拟器局部PASS勾选完整验收。详见implement末节。

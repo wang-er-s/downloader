@@ -165,7 +165,7 @@ Future<void> pause(String taskId) async {
 
 ### 1. Scope / Trigger
 
-适用于 AndroidEngine、原生通道、Service/Coordinator、传输/恢复核心及 OwnedMaterialCleanup 的命令、执行和清理边界。2026-11-04 v7 显式取消生产源码独立局部 PASS：88项 JVM、flutter analyze 和 debug APK 构建通过；Dart 未改，沿用前轮独立102项。20项 Android SQLite instrumentation 仅编译；真实 Service/SQLite/通道及 API29/30/33/35/36 设备矩阵仍 BLOCK，完整任务不得勾选或归档。
+适用于 AndroidEngine、原生通道、Service/Coordinator、传输/恢复核心及 OwnedMaterialCleanup 的命令、执行和清理边界。2026-11-04 v7 显式取消生产源码独立局部 PASS：88项 JVM、flutter analyze 和 debug APK 构建通过；Dart 未改，沿用前轮独立102项。20项 Android SQLite instrumentation 已在 API37 模拟器 emulator-5554 独立实跑，20/0失败/0错误/0跳过；真实 Service/通道及 API29/30/33/35/36 真机矩阵仍 BLOCK，完整任务不得勾选或归档。
 
 ### 2. Signatures
 
@@ -182,7 +182,7 @@ Future<void> pause(String taskId) async {
 
 - 进程随机会话、单协调队列不依赖 Activity；detach 只解绑监听。命令深复制并重新解析，固定完整执行键、commandId、会话、期望版本及 URL。原生只接受 Int/Long 计数，拒绝负数、未知版本、控制字符、非法名称和嵌套身份不匹配。
 - register 原子登记执行及 NULL 未知命令结果；acceptWorker 同事务保存 queued 接受结果及 worker_authorizations。不可变 enqueue 结果与后续递增 worker 事实分离；同 commandId/规范化载荷重放，不同载荷拒绝。未知 NULL 结果不是重跑 HTTP 的许可。
-- v1→v7 保留旧历史并依次补材料、worker、恢复/候选/分支及取消清理表；v2–v6 仅补后续表。SQLiteOpenHelper 同事务迁移 DDL 与 user_version，未知版本拒绝，失败保留数据库；第二 DDL 失败回滚前一 DDL、版本和新意图，回滚失败不覆盖首异常。迁移断言目前仅编译，未在 Android 设备执行。
+- v1→v7 保留旧历史并依次补材料、worker、恢复/候选/分支及取消清理表；v2–v6 仅补后续表。SQLiteOpenHelper 同事务迁移 DDL 与 user_version，未知版本拒绝，失败保留数据库；第二 DDL 失败回滚前一 DDL、版本和新意图，回滚失败不覆盖首异常。迁移、回滚及未知版本保留断言已在 API37 模拟器真实 SQLite 执行；不代表其他 API 或真机已验证。
 - materials 以 command_id 为主键，保存完整执行归属和唯一 payload/facts 私有路径；外键引用命令和执行。worker_authorizations 以 enqueue/resume command_id 为主键，保存 session、engine、generation、version、allocated、stop、finished；完整命令和 task 归属仍在事务内核验，不能仅信任外键。
 - newTransfer 捕获完整命令/授权 URL；run 在建目录前拒绝 URL 替换。分配事务重查命令载荷、当前会话/执行/代次、授权版本、未停止/未完成及未消费条件，再消费一次性分配权并登记材料；旧 pending 路径仍要求 result=NULL，旧库命令不自动升级为 worker 权限。一个命令不能二次分配，即使原文件不存在也不能重下。
 - 原生 Context.filesDir 是唯一私有根，不使用 Dart staging 路径授权；拒绝根别名和 symlink 暂存目录。先提交 UUID 双文件归属，后以 CREATE_NEW+NOFOLLOW_LINKS 排他创建 facts/part，再请求网络；失败保留材料。空 staging 目录可能先存在，不授予恢复/删除权。私有 sandbox 排除同 UID 恶意写入者，未承诺完全 TOCTOU 安全或目录项 fsync。
@@ -272,8 +272,9 @@ Future<void> pause(String taskId) async {
 - 恢复测试：独立 Python hashlib/struct 固定向量及重复 snapshot；真实 GET 206/200/416/redirect、强弱验证器、坏 Range/长度/total、源 prefix 与 tail、复制中断、candidate close、首异常与 typed suppressed 关闭异常。after-force/双 close、late CANCEL、响应头停止等已有核心回归保留。
 - 公开 Coordinator.resume 入口真实 socket/file/core 回归：enqueue→pause8192→resume→pause16384→resume→publishing，3GET/2candidate，逐字节/whole SHA256、原24576字节 tail及旧 candidate不变。重复/NULL/旧身份、坏 prefix、queued stop、同执行一 worker/全局两 worker、新 Runtime 零请求与显式继续、persist-before-event、终态补存零新增 GET/candidate。Journal 为 host fake。
 - 认证/复制各 PAUSE/CANCEL 四组合、复制暂停伴随 payload.close 失败、final proof 屏障暂停伴随提交失败和持久 cancel 竞争使用确定 latch；分别保留旧 proof、返回 fileWriteFailure/persistenceFailure 或 cleanupFailure，不把 Stopped.bytes 作进度。
-- 20项 SQLite instrumentation 覆盖历史迁移/回滚、resume/branch 归属与 v7 意图/完成结果、候选双向归属、删除前重验。全部仅编译；真实 Android SQLite、跨连接清理竞争及完整 generation/故障组合尚未执行。
+- 20项 SQLite instrumentation 覆盖历史迁移/回滚、resume/branch 归属与 v7 意图/完成结果、候选双向归属、删除前重验，已在 API37 模拟器真实执行并独立复跑，20个唯一 case、零失败/错误/跳过（11.615s）。日志 `/tmp/android-sqlite-independent-final.log`、`/tmp/android-sqlite-independent-final-results.xml`，Gradle正常退出0。跨连接分配门已覆盖；跨连接清理竞争及完整 generation/故障组合仍未执行。
 - 取消生产入口真实 socket/file 回归覆盖终态补存、错误身份拒绝、Int/Long 等价及并发重放只补一次、零新增 GET，关闭失败保留原件/候选；Journal 为 host fake。清理核心覆盖整集合校验、symlink/越界零删除、部分删除和 done 失败重试。
+- Instrumentation runner 逐 case 报 start=1/pass=0/failure=-2 和 class/test/current/numtests；finish 及 adb 退出0不能代替 XML 的非零用例数与失败状态。后台 responder 捕获所属 case 的异常队列，join 超时/中断使该 case 失败，迟到异常不得归入下个 case。TCP read 无固定分片大小，暂停夹具按累计阈值等待，保留精确 offset/Range/hash 断言；失败历史 XML 须证明 Gradle 拒绝且后续 case 继续。
 - 后续执行 API29/30/33/35/36 的 Service、通知/后台限制、timeout、Activity 重连、强杀重开零 HTTP、TLS、SQLite/磁盘故障和真实大文件；目录 fsync、发布完成材料释放与用户目录发布仍未验收。
 
 ### 7. Wrong vs Correct

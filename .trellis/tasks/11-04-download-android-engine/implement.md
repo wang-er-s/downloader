@@ -284,3 +284,32 @@ frontend architecture/index与源design同步v5双候选表、inspectCandidate�
 - 检查进程在1800000ms上限终止，但指定完整报告及结构化acceptance已保存；父代理直接核对报告、最终JUnit XML88项全0、Gradle/analyze日志与源码，不将超时状态本身当通过，也未重复运行已完成检查。
 - 核对cleanupMembers双向归属、beginCancel/finishCancel持久清单及OwnedMaterialCleanup整集合校验；规范index/architecture与源design同步为v7，保留20项SQLite仅编译和设备/完整PRD BLOCK。
 - 检查点只提交本轮原生实现/测试、任务design/implement及三份规范；不包含既有.pi修改与docs下任何路径，不stage未知docs/.trellis产物。不归档、不勾PRD。后续优先取得真实Android SQLite/Service设备证据；用户目录发布由file-storage任务承接，不能以本地清理通过跳过平台安全门。
+
+
+## API37 SQLite 实际执行窄轮（2026-11-04，20项设备局部PASS）
+
+- 本轮按已授权现有任务实施，不创建任务、不勾PRD、不修改正式规范。应用 trellis-before-dev，读取 implement.jsonl 六项及任务 PRD/design/implement；超过32KB文档直接分段读取，共享 guides/index 不存在。仅使用已运行 emulator-5554 / Pixel_10_Pro_XL API37（getprop SDK=37），未启动AVD、安装SDK、改许可证或依赖。
+- 原 runner 捕获首失败后 RESULT_CANCELED，Gradle只识别0项。现保留全部20个明确case，逐项 sendStatus(start=1/pass=0/failure=-2)，携带 class/test/current/numtests；失败保留原stack与suppressed关闭/loopback异常，继续后续case，末尾输出总数/失败数并标准完成。正常instrumentation结束码不表示用例成功，必须核对标准case状态/XML及Gradle结果。第二轮真实失败已证明Gradle能命名失败并返回1，第三轮20/20执行仍因1个断言失败返回1，无跳过/掩盖。
+- 修正旧夹具一：无worker授权的完成命令expectedReceiptVersion已经落后head，registerMaterials先检查staleReceipt，不能为了commandAlreadyCompleted期望放松head门。测试改为精确staleReceipt，并新增回执/材料记录不变断言，分配文件仍不存在。
+- 修正旧夹具二：设备HTTP首个read实际8138字节，并非保证8192；测试原先首sample就PAUSE导致8192断言失败。按累计8192/16384才请求暂停，仍精确断言原目标offset/Range/字节/摘要与源tail；未放宽阈值断言。三个既有loopback responder统一捕获后台异常、join后归入所属测试，保留原异常，防止Socket closed直接崩整个instrumentation进程。未新增网络case或替换框架。
+- 修正旧夹具三：cancelling checkpoint默认resumeSupport=unknown，Journal刻意不从branch派生取消恢复能力；生产Coordinator显式传unsupported。测试改为相同显式输入，保留unsupported/null ref断言，两个proof/staged边界均实际执行。生产安全逻辑无语义修改；入场时ExecutionJournal.kt已有25行纯格式化diff，核对后原样保留。
+- 失败证据保留：父轮 /tmp/android-cleanup-device-instrumentation.log 为0 tests/Gradle失败；本轮 /tmp/android-sqlite-runtime-first.log 为runner编辑多余括号导致编译失败（已修正）；second.log/second.exit=1 记录8138失败及后台Socket closed崩溃，XML另存second-results.xml；third.log/third.exit=1及third-results.xml记录20项全部执行但unsupported!=unknown失败。所有本轮文件使用 /tmp/android-sqlite-runtime- 前缀，无失败当通过。
+- 最终从android/使用既有JBR执行 JAVA_HOME='/Applications/Android Studio.app/Contents/jbr/Contents/Home' ./gradlew -Pandroid.builder.sdkDownload=false :app:testDebugUnitTest :app:connectedDebugAndroidTest :app:assembleDebug，/tmp/android-sqlite-runtime-final.log，final.exit=0，BUILD SUCCESSFUL in19s。Gradle明确20/20、0 skipped/0 failed；final-results.xml为20 tests、0 failures/errors/skipped、20个唯一名称、设备用例总时11.361s。前一轮同命令fourth.log也20/20通过，final覆盖最后排版源码。JVM XML六组共88项（5+20+30+7+23+3）零失败/错误/跳过，unit任务复用有效UP-TO-DATE产物，本轮未改JVM/生产语义，不宣称强制重执行88项。debug APK assemble成功。
+- 20项真实运行使用Android SQLiteOpenHelper/SQLiteDatabase（不是host fake），包含v1至v7逐版本保历史/DDL触发回滚、未知版本不破坏、跨连接分配、持久resume授权/退休、多branch/历史终态、proof/staged取消门、v7双向归属/清理意图失败/重开/最终保存失败与missing重放。仅此API37模拟器证据，不等同Service/MethodChannel或API29/30/33/35/36真机矩阵。
+- Dart未改，本轮不重跑flutter analyze/flutter test；沿用前轮独立analyze及102项，不声称本轮执行。git diff --check通过、暂存为空；父manifest最初差异仅ExecutionJournalTest和入场已存在Journal格式化，文档记录后另有本任务design/implement。既有.pi/docs及其他受保护文件未改。未stage/commit/push/archive/reset/clean。
+- 完整Android PRD/平台仍BLOCK：Service与通知/后台/timeout/强杀重开零HTTP、API29/30/33/35/36真机、TLS/真实磁盘force-close/目录fsync、真实>4GiB、用户目录发布、非空release ack和v7跨连接清理竞争/全部generation故障组合未验收。本轮没有新增上述未测能力结论。
+
+## API37 SQLite runner 窄范围独立检查（2026-11-04）
+
+- 完整读取check.jsonl六项及PRD/design/implement；超过32KB文件直接分段读取。独立审查runner和三类fixture，不重做v7全范围。Journal相对HEAD的词法token（包括字符串/运算符/括号）完全相同，15增10删仅排版，无生产语义变更。
+- 三类fixture符合现有生产门：无worker完成命令先staleReceipt再检查result，保留无文件/原回执/材料记录不变；累计8192/16384阈值避免TCP首read=8138问题，服务端各暂停阶段只发到目标字节，仍精确offset/Range/digest/原件断言；cancelling显式unsupported与Coordinator.checkpoint一致，保留null ref及两个取消边界。
+- 独立修正runner：后台异常队列改为每case新建并在responder创建时捕获，避免join超时后的迟到异常污染后续case；join中断也归入该case失败。超时仍明确报告失败，不将存活线程当通过；正常join后保留原异常和suppressed。标准start/pass/failure及20项总数、失败后继续保持。未新增故意失败源码。
+- 修改前及最终修改后均从android/实际执行 JAVA_HOME='/Applications/Android Studio.app/Contents/jbr/Contents/Home' ./gradlew -Pandroid.builder.sdkDownload=false :app:connectedDebugAndroidTest :app:assembleDebug，分别20s/19s正常退出0。最终/tmp/android-sqlite-independent-final.log、final.exit=0、final-results.xml：20唯一case，20/0失败/0错误/0跳过，11.615s；getprop SDK=37。前轮third.exit=1及third-results.xml独立核对20项/1失败，原unsupported!=unknown stack存在且第19/20项继续执行，确认runner确实使Gradle失败。
+- JVM未重跑：现存有效XML88/0/0/0仅作沿用证据；Dart未改，不重跑analyze/102项。git diff --check通过，暂存空。父manifest初始只测试文件与本轮检查差异；追加本记录后仅两个授权文件改变。未改生产/PRD/task.json/规范/依赖/SDK/既有.pi/docs，未stage/commit/push/archive或启动AVD。
+- 结论：本轮API37真实SQLite runner/fixture局部PASS，无剩余本轮阻断；完整Android PRD继续BLOCK。API29/30/33/35/36真机矩阵、Service/通道/通知/后台/timeout/强杀重开、TLS、实际磁盘force-close、目录fsync、真实>4GiB、用户目录发布、非空release ack及跨连接清理竞争/完整generation故障组合未据此验收。
+
+## API37 SQLite 检查点父代理收口（2026-11-04）
+
+- 核对独立报告及最终 XML：20个唯一case、20/0失败/0错误/0跳过，11.615s；Gradle退出0。独立复审备份仅测试runner与本implement两项差异。自动格式化后的ExecutionJournal与HEAD词法等价，保留排版变化。
+- index、architecture与源design同步API37真实SQLite局部证据及runner约定；本检查点仅测试/排版、任务design/implement和三份规范，不包含.pi或docs，不勾PRD、不归档。
+- 后续优先补同API37模拟器的真实Service/Runtime入口、Activity重连及强杀重开零HTTP证据；模拟器仍不替代API29/30/33/35/36真机。用户目录发布由file-storage接续，非空release ack继续拒绝。
