@@ -3,7 +3,7 @@
   "name": "download-file-storage",
   "title": "跨平台目录与文件发布恢复",
   "description": "实现默认及自选目录、创建前发布意图、归属核对、不覆盖发布、恢复与清理及系统打开。",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": null,
   "package": null,
