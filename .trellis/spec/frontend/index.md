@@ -4,16 +4,17 @@
 
 适用于本仓库 Flutter 应用及各平台适配：Android、macOS、Windows 为必需平台，iOS 为希望一并提供、需验证可行性的平台。采用按功能组织目录、MVVM 职责划分、Repository/Service 分层，Riverpod 负责状态管理与依赖注入。复杂业务按需提取 UseCase。
 
-领域/执行 DTO、DownloadEngine、FileStorage 与 AppStore v1 已实现；PluginEngine、AndroidEngine 及文件发布/完成源显式 ack 释放已有局部独立证据。当前 Plugin commands.sqlite v2、Android execution v8；普通/旧 ack 不删完整源。最新57 focused（55桥＋2锁）、macOS5引擎＋9文件真实集成、93 JVM 独立 --rerun-tasks 和 flutter analyze 通过。22项 Android instrumentation 本轮仅编译，旧 API37 v7 的20 SQLite＋7 Runtime 为历史通过，不证明 v8。完整 FileStorage PRD 仍 BLOCK/in_progress，Apple/SAF 现存目标删除与用户目录临时副本回收仍是功能缺口；Windows 缺环境，macOS host12/iOS前轮host15不证明最低10.15/14。用户负责 Android 实机，不阻塞其他功能。Repository、Riverpod 与业务 UI 尚未实现，`lib/main.dart` 仍为计数器。具体执行与平台边界见以下规范。
+领域/执行 DTO、DownloadEngine、FileStorage 与 AppStore v2 与三个 Repository 已实现；PluginEngine、AndroidEngine 及文件发布/完成源显式 ack 释放已有局部独立证据。当前 Plugin commands.sqlite v2、Android execution v8；普通/旧 ack 不删完整源。最新57 focused（55桥＋2锁）、macOS5引擎＋9文件真实集成、93 JVM 独立 --rerun-tasks 和 flutter analyze 通过。22项 Android instrumentation 本轮仅编译，旧 API37 v7 的20 SQLite＋7 Runtime 为历史通过，不证明 v8。完整 FileStorage PRD 仍 BLOCK/in_progress，Apple/SAF 现存目标删除与用户目录临时副本回收仍是功能缺口；Windows 缺环境，macOS host12/iOS前轮host15不证明最低10.15/14。用户负责 Android 实机，不阻塞其他功能。Repository 最新独立验证 141 项（36 仓库＋105 既有）、analyze clean、1 项真实 macOS smoke（总 GET=2，重开零新增）；Riverpod、Provider 与业务 UI 尚未实现，`lib/main.dart` 仍为计数器。具体执行与平台边界见以下规范。
 
 ## 规范入口
 
 | 文档 | 内容 |
 | --- | --- |
 | [架构与跨层契约](architecture.md) | 分层、Riverpod、暂停确认、执行身份、持久回执、字节进度与发布恢复断言 |
-| [领域与持久化契约](persistence.md) | 已有 DTO/JSON、AppStore 事务、四表 v1、确认身份与高水位、异常及真实 SQLite 测试 |
+| [领域与持久化契约](persistence.md) | 已有 DTO/JSON、AppStore 事务、四表 v2、原始创建输入与事务迁移、确认身份与高水位、异常及真实 SQLite 测试 |
 | [插件执行与恢复契约](plugin-engine.md) | 已实现适配器、独立执行日志、业务确认、prefix 恢复与尚未验收的平台边界 |
 | [文件发布与源释放契约](file-storage.md) | 真实工厂/默认目录、唯一发布日志、取消重放、completed 同事务显式 ack、异步 SQLite 门及平台缺口 |
+| [仓库与恢复协调契约](repositories.md) | 三仓库真实签名、分队列、取消优先、提交后通知、完整 ack 重放与只读启动 |
 
 需求来源：[下载管理器需求](../../../.agents/specs/download-manager/requirements.md)；跨平台方案见 [设计文档](../../../.agents/specs/download-manager/design.md)。功能范围以需求为准；本目录约束如何实现，不扩展需求范围。
 

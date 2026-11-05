@@ -19,30 +19,32 @@ final class AppStore {
           .single
           .values
           .single;
-      if (version == 0) {
-        database.execute('BEGIN IMMEDIATE');
-        try {
-          database.execute(appStoreSchemaV1);
-          database.execute('COMMIT');
-        } catch (_) {
-          try {
-            database.execute('ROLLBACK');
-          } catch (_) {
-            // Preserve the initialization failure if SQLite already rolled back.
-          }
-          rethrow;
-        }
-      } else if (version != 1) {
+      if (version != 0 && version != 1 && version != 2) {
         invalid(FailureCode.protocolMismatch);
       }
-      // Fail closed for damaged/incomplete v1 databases. Never recreate tables.
-      for (final query in [
-        'SELECT ${_taskColumns.join(',')} FROM download_tasks LIMIT 0',
-        'SELECT id,url,file_name,directory_json,created_at,updated_at FROM saved_downloads LIMIT 0',
-        'SELECT engine_id,generation,task_id,receipt_version,release_refs_json FROM engine_receipt_acks LIMIT 0',
-        'SELECT id,theme,default_directory_json FROM app_settings LIMIT 0',
-      ]) {
-        database.select(query);
+      database.execute('BEGIN IMMEDIATE');
+      try {
+        if (version == 0) database.execute(appStoreSchemaV1);
+        if (version == 0 || version == 1) {
+          database.execute(
+            'ALTER TABLE download_tasks ADD COLUMN create_input_json TEXT',
+          );
+          database.execute('PRAGMA user_version = 2');
+        }
+        for (final query in [
+          'SELECT create_input_json,${_taskColumns.join(',')} FROM download_tasks LIMIT 0',
+          'SELECT id,url,file_name,directory_json,created_at,updated_at FROM saved_downloads LIMIT 0',
+          'SELECT engine_id,generation,task_id,receipt_version,release_refs_json FROM engine_receipt_acks LIMIT 0',
+          'SELECT id,theme,default_directory_json FROM app_settings LIMIT 0',
+        ]) {
+          database.select(query);
+        }
+        database.execute('COMMIT');
+      } catch (_) {
+        try {
+          database.execute('ROLLBACK');
+        } catch (_) {}
+        rethrow;
       }
     } catch (_) {
       database.close();
@@ -131,6 +133,37 @@ final class StoreTransaction {
       id,
     ]);
     return rows.isEmpty ? null : _taskFromRow(rows.single);
+  }
+
+  CreateDownload? readCreateInput(String requestId) {
+    _check();
+    final rows = _database.select(
+      'SELECT create_input_json FROM download_tasks WHERE request_id=?',
+      [nonEmpty(requestId)],
+    );
+    if (rows.isEmpty || rows.single['create_input_json'] == null) return null;
+    return CreateDownload.fromJson(
+      jsonObject(jsonDecode(rows.single['create_input_json'] as String)),
+    );
+  }
+
+  void createTask(DownloadTask task, CreateDownload input) {
+    _check();
+    if (task.requestId != input.requestId ||
+        task.originalUrl != input.url ||
+        task.requestedFileName != input.fileName ||
+        readTask(task.id) != null ||
+        (input.directory != null &&
+            jsonEncode(task.directory.toJson()) !=
+                jsonEncode(input.directory!.toJson())) ||
+        readTasks().any((t) => t.requestId == input.requestId)) {
+      invalid(FailureCode.stateConflict);
+    }
+    saveTask(task);
+    _database.execute(
+      'UPDATE download_tasks SET create_input_json=? WHERE id=?',
+      [jsonEncode(input.toJson()), task.id],
+    );
   }
 
   void saveTask(DownloadTask task) {

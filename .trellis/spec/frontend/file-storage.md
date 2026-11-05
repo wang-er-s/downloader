@@ -2,7 +2,7 @@
 
 ## 1. Scope / Trigger
 
-适用于 [FileStorage](../../../lib/shared/platform/file_storage.dart)、[平台工厂](../../../lib/shared/platform/platform_file_storage.dart)、[NativeFileStorage](../../../lib/shared/platform/native_file_storage.dart) 和执行侧 [PublicationJournal](../../../lib/features/downloads/data/publication_journal.dart)。发布与 completed 显式私有源释放已有生产实现及 macOS 局部独立证据；完整 FileStorage PRD 仍 BLOCK/in_progress。Repository、Riverpod、业务 UI 尚未实现。Android 实机由用户负责，不阻塞其他功能。
+适用于 [FileStorage](../../../lib/shared/platform/file_storage.dart)、[平台工厂](../../../lib/shared/platform/platform_file_storage.dart)、[NativeFileStorage](../../../lib/shared/platform/native_file_storage.dart) 和执行侧 [PublicationJournal](../../../lib/features/downloads/data/publication_journal.dart)。发布与 completed 显式私有源释放已有生产实现及 macOS 局部独立证据；完整 FileStorage PRD 仍 BLOCK/in_progress。三个 Repository 已接入并局部独立 PASS，见[仓库契约](repositories.md)；Riverpod/Provider/业务 UI 尚未实现。Android 实机由用户负责，不阻塞其他功能。
 
 ## 2. Signatures
 
@@ -34,7 +34,7 @@ Apple/Windows 使用 `platformFileStorage(journal: pluginEngine.publicationJourn
 | Plugin `commands.sqlite` v2 | 保留 executions/commands/acknowledgements；事务迁移 v1，新增 complete_sources(id,ref,members)、material_releases(id,ack,done) |
 | Android `android_execution_v1.db` v8 | 依次保留 v1–v7 历史，新增 completed_sources(engine,generation,ref,members,ack,done) |
 
-未知版本拒绝，迁移失败回滚留库，禁止删库重建；AppStore 仍四表 v1。旧 completed 可通过同发布身份的本地回执重放补登记 opaque 引用、生成新完成版本，不新增 GET/目标。
+未知版本拒绝，迁移失败回滚留库，禁止删库重建；AppStore 为四表 v2（仅增加原始创建输入列，见[持久化契约](persistence.md)）。旧 completed 可通过同发布身份的本地回执重放补登记 opaque 引用、生成新完成版本，不新增 GET/目标。
 
 ## 3. Contracts
 
@@ -76,7 +76,7 @@ Apple/Windows 使用 `platformFileStorage(journal: pluginEngine.publicationJourn
 - 断言：同名不覆盖、创建/最终未知 uncertain、已知最终身份回执补存、原 cancel 重放、外来替换/symlink、安全拒删；completed 同事务 ack、旧/伪造/未提交 ack 保源，晚目录/等待 cancelling 零删除，delete后 done 失败与最终 ack INSERT 失败重开，GET=1。
 - 真实双 isolate 与同 isolate 异步等待者均等 owner 异步 IO 完成；owner 抛错后可再取锁。未新增跨进程强杀锁主实验。
 - Plugin v1→v2、迁移失败/未知版本留库已回归；Android v7→v8 与释放故障22项 instrumentation 本轮仅编译，设备执行0。旧 API37 v7 的20 SQLite＋7 Runtime 历史通过不是 v8 通过。
-- macOS 临时 host12 不证明10.15；iOS 前轮 host15 无签名编译不证明14；Windows 缺环境。Android 提供方/实机由用户验证。持久授权撤销、外部提供方、空间不足、锁定、系统打开/APK、Apple/SAF 正常删除、Repository 接线仍待完成，PRD 不勾选、不归档。
+- macOS 临时 host12 不证明10.15；iOS 前轮 host15 无签名编译不证明14；Windows 缺环境。Android 提供方/实机由用户验证。持久授权撤销、外部提供方、空间不足、锁定、系统打开/APK、Apple/SAF 正常删除仍待完成；Repository 接线已局部通过（141 项、1 项 macOS smoke，总 GET=2、重开零新增），见[仓库契约](repositories.md)，PRD 不勾选、不归档。
 
 ## 7. Wrong vs Correct
 

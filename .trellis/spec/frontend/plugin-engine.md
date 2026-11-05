@@ -4,7 +4,7 @@
 
 适用于 [PluginEngine](../../../lib/features/downloads/data/plugin_engine.dart) 与 [固定插件补丁](../../../third_party/background_downloader/PATCHES.md)。适配器、桌面并发日志、prefix 恢复及有界检查点摘要已实现并独立复核；整个子任务仍为 BLOCK/in_progress。iOS 私有恢复、材料释放和真机生命周期，Windows 实机、macOS 10.15/iOS 14 最低目标尚未验收。
 
-共享模型、AppStore v1 和 AndroidEngine 协议不变；业务表仍由 Repository 写入，原生/插件只拥有执行日志。源方案见 [设计](../../../.agents/specs/download-manager/design.md)。
+共享模型和 AndroidEngine 协议不变；AppStore 已为四表 v2，业务表由三个已实现的 [Repository](repositories.md) 写入，原生/插件只拥有执行日志。源方案见[设计](../../../.agents/specs/download-manager/design.md)。
 
 ## 2. Signatures
 
@@ -68,6 +68,8 @@ Future<void> close();
 当前独立复核：基础 48 项、定向 34 项（[摘要](../../../third_party/background_downloader/test/material_digest_test.dart) 5 项含 Python hashlib 独立固定向量、[HTTP 边界](../../../third_party/background_downloader/test/execution_boundary_test.dart) 28 项、[日志并发](../../../third_party/background_downloader/test/execution_journal_race_test.dart) 1 项且 400/400）、[真实 macOS 集成](../../../integration_test/plugin_engine_test.dart) 1 项，以及 flutter analyze 通过。整个插件子任务尚未通过。
 
 以上为插件阶段历史证据。后续 FileStorage/completed 释放最新独立结果为57 focused（55桥＋2真实锁）、macOS5引擎＋9文件集成、93 JVM 强制重跑及 analyze 干净；覆盖异步业务取消竞争、晚目录零删除、done/最终 ack 失败重开与双 isolate 门。Android v8 的22设备夹具仅编译；完整平台边界见[文件契约](file-storage.md)。
+
+Repository 最新独立交付为 141 项（36 仓库＋105 既有）、analyze clean、1 项真实 macOS smoke：完成与未完成两项总 GET=2，重开零新增 GET/发布。本轮文档同步沿用 delivery 日志，不重跑产品测试；不扩展为 iOS/Windows/最低版本验收，详情见[仓库契约](repositories.md)。
 
 - 强验证器/Range/总长/本地损坏、未知长度 EOF 前增长、真实暂停继续、失败 pending、复制故障与重试；copying、旧引用及原件 hash 必须保留。
 - 三处交付中断是适配器重建与真实 SQLite 故障注入；确认前未提交拒绝，旧确认/恶意路径/symlink/非法晚成员不误删材料；不能称作三次 OS 强杀。

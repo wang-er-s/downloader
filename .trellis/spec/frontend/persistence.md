@@ -2,7 +2,7 @@
 
 ## 1. Scope / Trigger
 
-适用于下载领域/引擎 DTO、共享 SQLite v1，以及后续 Repository 对状态与确认的原子对齐。领域与 AppStore 已实现；执行日志见[插件执行契约](plugin-engine.md)，用户目录发布与 completed 私有源显式释放已有生产实现和局部验证，见[文件契约](file-storage.md)。Repository 调度尚未实现。源业务方案见[设计文档](../../../.agents/specs/download-manager/design.md)。
+适用于下载领域/引擎 DTO、共享 SQLite v2 及已实现的三个 [Repository](repositories.md)。执行日志见[插件执行契约](plugin-engine.md)，用户目录发布与 completed 私有源显式释放见[文件契约](file-storage.md)。源业务方案见[设计文档](../../../.agents/specs/download-manager/design.md)。
 
 实现入口为 [AppStore](../../../lib/shared/data/app_store.dart)、[schema](../../../lib/shared/data/app_store_schema.dart) 和 [领域模型](../../../lib/features/downloads/domain/download_models.dart)。domain 仅依赖 Dart；Flutter、SQLite、插件类型不得泄漏进入领域。
 
@@ -10,7 +10,7 @@
 
 ## 2. Signatures
 
-以下为现有 API；Repository 对 Engine 的确认调用仍属于后续接入。
+以下为现有 API；Repository 已接入业务事务与 Engine 确认。
 
 ```dart
 AppStore(Database database);
@@ -27,6 +27,8 @@ void close();
 事务回调内的 `StoreTransaction` 提供：
 
 ```dart
+CreateDownload? readCreateInput(String requestId);
+void createTask(DownloadTask task, CreateDownload input);
 void saveTask(DownloadTask task);
 void deleteTask(String id);
 bool commitReceipt(DownloadTask task, ReceiptAck ack);
@@ -39,7 +41,7 @@ void saveSettings(AppSettings settings);
 
 事务内另有同名类型化读取入口。`AppStore.openPersistent` 默认通过 application-support 定位 `downloader.db`；`databasePath` 仅是可测试入口，不是公共下载目录配置。不新增环境变量或网络 API。
 
-数据库固定四表：download_tasks、saved_downloads、app_settings、engine_receipt_acks；列与约束以 schema 和源设计为准。request_id、engine_id 唯一；确认主键为 `(engine_id,generation)`，没有任务外键。不要增加配置到任务的级联关系。
+数据库固定四表：download_tasks、saved_downloads、app_settings、engine_receipt_acks；request_id、engine_id 唯一，确认主键为 `(engine_id,generation)`，无任务外键，不增加配置到任务级联。最终 v2 结构为 app_store_schema.dart 的 appStoreSchemaV1 基础 DDL 加 `ALTER TABLE download_tasks ADD COLUMN create_input_json TEXT`，不是额外业务表。
 
 ## 3. Contracts
 
@@ -55,7 +57,8 @@ void saveSettings(AppSettings settings);
 - `saveAcknowledgement` 核对现存 engine 所属 taskId 及代次；保留旧代次确认重放能力，拒绝其他所有者或超前代次。同版本不同确认拒绝，较低版本不得替换更高版本及其 releaseResumeRefs。
 - 取消/删除事务先保存最后确认再删除任务；确认行不级联删除。普通暂停/失败确认的 releaseResumeRefs 为空，实际材料归属和释放由引擎再校验；存储不会删除文件或自行判断可回收材料。
 - `commitReceipt` 返回 false 时不能据此确认传入的新载荷：查询已提交确认并按该行重放。AppStore 不执行取消优先、发布恢复、启动协调等 Repository 状态机。
-- user_version=0 原子初建，version=1 验证必要表/列，未知版本拒绝且保留库。尚无已发版旧结构，不能宣称已验证历史迁移；以后逐版本迁移，绝不删库重建。回滚尽力执行，回滚失败不得掩盖最初异常。
+- 初始化先拒绝非 0/1/2 版本并关闭连接、保留原库。BEGIN IMMEDIATE 内：0 执行 v1 基础 DDL，再与 1 一样增加 nullable create_input_json TEXT、设 user_version=2；2 不再 ALTER。验证四表必要列后 COMMIT，失败回滚留库、保留首异常。
+- createTask 同事务保存任务和 CreateDownload.toJson() 规范化原输入；校验 requestId/URL/文件名、任务不存在、requestId 唯一及显式目录一致。NULL 目录仍表示原请求未指定目录，不能以已固化目录代替；readCreateInput 按 requestId 读取，无行或历史 NULL 返回 null。普通 saveTask 不覆盖该列；历史输入未知由仓库拒绝去重。
 - completed 显式释放使用既有 resumeRef/releaseResumeRefs 承载 complete: opaque 引用，即使 resumeSupport=unsupported 也不能解释为可续传。commitReceipt 必须同事务保存业务 completed、完整回执、最终 FileLocation、published PublishOperation 与完整 ReceiptAck，再显式 acknowledge；普通/旧 ack 不删完整源。同版本完整回执及 ack 不可变，不能先存空 ack 再改释放载荷。执行侧 Plugin commands.sqlite v2/Android execution v8 的 intent、逐成员 done 和最终 ack 不属于 AppStore 四表；恢复及异步授权重核见[文件契约](file-storage.md)。
 
 ## 4. Validation & Error Matrix
@@ -73,12 +76,12 @@ void saveSettings(AppSettings settings);
 ## 5. Good/Base/Bad Cases
 
 - Good：先已有任务，新的真实执行回执与确认同事务提交；重开读取相同快照与确认，再按持久确认通知引擎。
-- Base：空库首次原子创建；readSettings 为 null 时由后续 Repository 初始化默认设置；完全相同回执重放不重复写入。
+- Base：空库首次原子创建；readSettings 为 null 时由 SettingsRepository 初始化默认设置；完全相同回执重放不重复写入。
 - Bad：伪造其他 taskId 首次占确认主键、同版本修改恢复引用、SQL 触发器中途失败、SQLite 已自行回滚、未知 JSON 版本；都不能污染已有记录或用删库掩盖问题。
 
 ## 6. Tests Required
 
-现有 [contracts_test](../../../test/features/downloads/contracts_test.dart) 与 [app_store_test](../../../test/shared/data/app_store_test.dart) 覆盖以下断言；独立检查后当前主机 `flutter analyze` 无问题，48 项测试通过（27 契约、20 SQLite、1 保留的计数器测试）。
+现有 [contracts_test](../../../test/features/downloads/contracts_test.dart) 与 [app_store_test](../../../test/shared/data/app_store_test.dart) 覆盖下列断言；基础阶段 48 项为历史记录。最新独立交付为 141 项（36 仓库＋105 既有）、analyze clean 和 1 项真实 macOS 仓库集成，证据及限制见[仓库契约](repositories.md)。
 
 - 不可变嵌套集合、版本/枚举/输入边界、完整 DTO 往返、未知总长 null。
 - 真实 SQLite 内存和临时磁盘库、重开、超过 4GiB 和最大 int64、重复 requestId 与表约束。
@@ -90,7 +93,7 @@ void saveSettings(AppSettings settings);
 
 ## 7. Wrong vs Correct
 
-以下为后续 Repository 接入片段，假定 task/ack 已校验、store/engine 已注入。
+以下为 Repository 已采用的事务边界示意，假定 task/ack 已校验、store/engine 已注入。
 
 错误：业务写入与确认分开，进程中断后丢确认重放依据。
 

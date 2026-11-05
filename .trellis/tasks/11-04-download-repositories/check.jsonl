@@ -5,3 +5,4 @@
 {"file": ".trellis/spec/frontend/file-storage.md", "reason": "Verify publication and completed ack production contract"}
 {"file": ".trellis/spec/frontend/persistence.md", "reason": "真实AppStore事务与确认高水位"}
 {"file": ".trellis/spec/frontend/plugin-engine.md", "reason": "执行授权、只读恢复与发布锁边界"}
+{"file": ".trellis/spec/frontend/repositories.md", "reason": "核对四表v2原输入、取消发布竞争、提交后通知、删除前完整ack及零自动传输证据"}

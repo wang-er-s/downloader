@@ -6,7 +6,7 @@
 
 依据：[需求文档](requirements.md)、[需求评审](review.md)、[Flutter 架构规范](../../../.trellis/spec/frontend/architecture.md)。截图仅作为界面与交互参考，不扩展代理、分享、认证资源、视频解析、搜索、批量管理等首期范围。
 
-**状态：用户已批准实施；领域/AppStore v1、引擎及 FileStorage/完成源显式释放已有局部独立证据，完整 FileStorage PRD 仍 BLOCK/in_progress。** 当前 Plugin commands.sqlite v2、Android execution v8，发布日志分别 publications.sqlite v1/android_publications_v1.db v1。工厂、目录、创建前意图、只读恢复、不覆盖、取消 cleanup→原 cancel 重放及 completed 同事务 ack 详见[文件契约](../../../.trellis/spec/frontend/file-storage.md)。最新57 focused（55桥＋2锁）、macOS5引擎＋9文件真实集成、93 JVM独立--rerun-tasks、analyze通过；22 Android instrumentation本轮仅编译。旧API37 v7的20 SQLite＋7 Runtime（绕过MethodChannel）为历史通过，不证明v8。Apple/SAF现存目标删除和用户目录临时副本回收为功能缺口；Windows缺环境，macOS host12/iOS前轮host15不证明最低10.15/14。Repository、Riverpod、业务UI未实现。用户负责Android实机，不阻塞其他功能。
+**状态：用户已批准实施；领域/AppStore v2、三个 Repository、引擎及 FileStorage/完成源显式释放已有局部独立证据，完整 FileStorage PRD 仍 BLOCK/in_progress。** 当前 Plugin commands.sqlite v2、Android execution v8，发布日志分别 publications.sqlite v1/android_publications_v1.db v1。工厂、目录、创建前意图、只读恢复、不覆盖、取消 cleanup→原 cancel 重放及 completed 同事务 ack 详见[文件契约](../../../.trellis/spec/frontend/file-storage.md)。最新57 focused（55桥＋2锁）、macOS5引擎＋9文件真实集成、93 JVM独立--rerun-tasks、analyze通过；22 Android instrumentation本轮仅编译。旧API37 v7的20 SQLite＋7 Runtime（绕过MethodChannel）为历史通过，不证明v8。Apple/SAF现存目标删除和用户目录临时副本回收为功能缺口；Windows缺环境，macOS host12/iOS前轮host15不证明最低10.15/14。Repository 局部独立 PASS：141 项（36 仓库＋105 既有）、analyze clean、1 项真实 macOS smoke（总 GET=2，重开零新增）；Riverpod/Provider/业务 UI 未实现，实际协调契约见[仓库规范](../../../.trellis/spec/frontend/repositories.md)。用户负责Android实机，不阻塞其他功能。
 
 ### 已确认的生命周期差异
 
@@ -127,7 +127,7 @@ third_party/background_downloader/    # 已引入固定 9.5.9 源码及有限补
 
 ### 1. Scope / Trigger
 
-跨越平台、数据库、执行及文件系统，必须明确命令确认和部分失败。DownloadEngine/FileStorage DTO及适配已有生产实现；Repository/Controller仍待接入。Android v7取消/FGS为历史局部PASS，当前v8 completed释放、Plugin v2及用户目录发布已有局部证据，完整平台验收未闭环。已有入口见[持久化契约](../../../.trellis/spec/frontend/persistence.md)、[Android执行契约](../../../.trellis/spec/frontend/architecture.md)、[插件契约](../../../.trellis/spec/frontend/plugin-engine.md)、[文件契约](../../../.trellis/spec/frontend/file-storage.md)。
+跨越平台、数据库、执行及文件系统，必须明确命令确认和部分失败。DownloadEngine/FileStorage DTO及适配已有生产实现；Repository 已接入，Controller/Provider 仍待实现。Android v7取消/FGS为历史局部PASS，当前v8 completed释放、Plugin v2及用户目录发布已有局部证据，完整平台验收未闭环。已有入口见[持久化契约](../../../.trellis/spec/frontend/persistence.md)、[Android执行契约](../../../.trellis/spec/frontend/architecture.md)、[插件契约](../../../.trellis/spec/frontend/plugin-engine.md)、[文件契约](../../../.trellis/spec/frontend/file-storage.md)。
 
 ### 2. Signatures
 
@@ -178,11 +178,11 @@ Future<void> setDefaultDirectory(DirectoryLocation directory);
 
 - CreateDownload：requestId、url、fileName?、directory?。requestId 对同一次提交稳定且唯一；数据库去重，相同 requestId 不同输入拒绝，不同提交同一 URL 可创建新任务。
 - URL 去除首尾空白，必须为 host 非空的 http/https；首期拒绝用户名/密码认证输入。用户文件名不能含路径穿越、分隔符和控制字符，并经平台合法性校验。
-- directory 为空时，创建事务读取当时全局默认值并固化到任务。可复用配置中的空目录仍表示未来发起时读取最新默认值，不能在保存配置时提前固化。
+- directory 为空时，create 先读取当时全局默认值，再同事务保存固化目录及规范化原输入；空输入不改写成显式目录。配置空目录仍表示未来发起时取最新默认值。
 - 创建顺序：事务保存任务和确定的 engineId/generation → 提交引擎。提交失败保留可识别失败记录；进程在两步之间终止时不自动补提交。
 - create/resume 成功表示已保存并接受执行，不表示下载完成。pause 必须等实际传输停止、恢复材料和暂停回执持久保存，再由 Repository 提交业务状态和确认记录后成功返回。
 - 同任务操作串行；已暂停再次暂停幂等，不可暂停/继续/删除的状态拒绝操作。Repository 校验时固定完整执行键和 expectedReceiptVersion，保存稳定 commandId，再发命令；适配器不得在发送或超时重试时重新查询并替换执行身份。页面不提前修改最终状态。
-- 同 commandId 的重复请求只返回原结果；相同 commandId 不同载荷拒绝。启动请求结果不明时先 inspect，不自动另造命令或重提下载。旧会话、旧代次或不匹配的期望版本返回 stateConflict；restartFromZero 只在用户确认后为 true，使用新代次且保留已有完成文件。
+- 同 commandId 重放原结果，载荷变化拒绝；结果不明只 inspect，不自动换身份或重提。restartFromZero 是待交付能力，当前 resume(..., restartFromZero:true) 明确 stateConflict/restartUnsupported，不以 cancel+enqueue 模拟新代次。
 - pickDirectory 返回 null 代表取消选择，旧值不变；save/config/delete 不操作由该配置创建的任务。
 
 #### 执行回执与持久化所有权
@@ -270,7 +270,7 @@ StandardMessageCodec 只用基本类型；未知版本、缺字段或类型错�
 
 所有模型不可变；字节数为非负 64 位整数，未知 totalBytes 为 null，不能用 0 或 -1 代替。EngineEvent 即使不知道总长也提供累计 downloadedBytes；它与恢复偏移分开，实际恢复以引擎已提交检查点和验证器为准。速度与剩余时间是派生值，不作为恢复依据。桌面路径使用系统 API 和 Uri.file 编码，不能手写 file:// 拼接 Windows 路径。
 
-### 共享 SQLite v1
+### 共享 SQLite v2
 
 AppStore 通过 sqlite3 在各平台的 application-support 持久目录创建 `downloader.db`，不放用户下载目录。短事务串行执行，SQL 参数绑定；长文件操作不在数据库事务或 UI 线程中执行。
 
@@ -298,7 +298,8 @@ CREATE TABLE download_tasks (
   publish_operation_json TEXT,
   last_error_json TEXT,
   created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  updated_at INTEGER NOT NULL,
+  create_input_json TEXT
 );
 CREATE TABLE saved_downloads (
   id TEXT PRIMARY KEY NOT NULL,
@@ -322,14 +323,15 @@ CREATE TABLE app_settings (
   theme TEXT NOT NULL CHECK (theme IN ('system', 'light', 'dark')),
   default_directory_json TEXT NOT NULL
 );
-PRAGMA user_version = 1;
+PRAGMA user_version = 2;
 ```
 
 - 不建立配置到任务的级联删除关系；从配置创建任务时复制值，删除配置不影响任务或文件。
 - 状态和主题用稳定字符串，时间用 UTC 毫秒；JSON 中的 platform/kind/version 需校验，未知结构返回数据版本错误，不能按空值覆盖原记录。
 - pending_command_json 保存已校验命令身份；启动结果不明时只查询，不在启动恢复中自动重发。publish_operation_json 镜像引擎的发布操作和待处理错误；target_ref 非空不等于发布成功。实现中的 target_ref 为 version=1 JSON 信封，保存 `{version:1,targetRef:String?,fileLocation:FileLocation?}`；两者皆空则 SQL NULL，未知版本拒绝，不将任意不透明引用猜测为 JSON。
 - engine_receipt_acks 的高水位与业务状态同事务更新，不能倒退；同执行同 receiptVersion 的完整回执和确认载荷必须相同，冲突返回 stateConflict。确认须核对现存任务的执行归属；保留的确认行也限制 engineId 被其他 taskId 重用或恢复旧代次。release_refs_json 仅包含已提交意图允许释放的本执行引用，任务移除后确认行仍保留，不设任务外键或级联删除。
-- AppStore v1 已落库：user_version=0 时原子初建，version=1 校验必要表/列；未知版本直接拒绝并保留数据库，尚无已发版旧结构可升级。以后变更须逐版本迁移，失败不得删库重建；引擎日志独立版本、独立写入连接。内部 DTO 的嵌套 key JSON 与 Android 扁平通道载荷分别映射；ResumeSupport 枚举为 unknown/supported/unsupported，实际续传能力仍由引擎验证。
+- 上述 SQL 表示最终四表 v2；源码 app_store_schema.dart 的 appStoreSchemaV1 仍是 v1 基础 DDL。AppStore 在 BEGIN IMMEDIATE 内对 version=0 先建基础四表，再与 version=1 一样 ALTER TABLE download_tasks ADD COLUMN create_input_json TEXT、设 user_version=2，并验证四表必要列后 COMMIT；version=2 只验证。未知版本拒绝并关闭连接，迁移失败回滚留库，不删库重建。
+- nullable create_input_json 保存 CreateDownload.toJson() 的规范化原输入；createTask 同事务写任务与输入，readCreateInput 按 requestId 读取，历史 NULL 表示未知，仓库以 stateConflict/createInputUnknown 拒绝猜测；普通 saveTask 保留此列。空目录与显式目录不同，去重限现存任务生命周期。执行日志独立版本，不新增额外业务表。
 - Android 原生日志、iOS 补丁原生日志、桌面补丁日志持久保存执行键、命令幂等结果、回执版本/确认水位、请求、恢复材料引用及 PublishOperation。iOS 无 Dart 时也可写入；共享 AppStore 不是原生后台写入目标。
 
 ### 状态机
@@ -370,12 +372,12 @@ failed 默认不自动重试；iOS 系统仍在调度的既有任务按真实状
 
 1. URL 和文件名校验在共享业务层完成，原生/插件边界再次校验。保存固化目录、执行键和命令身份后才开始传输。
 2. HTTP/HTTPS 支持重定向；Android 实现上限和循环检测。iOS 系统后台会话自行跟随重定向，不能假称每次均由 Dart 拦截。
-3. 文件名优先用户指定、响应 Content-Disposition（filename* 优先）、最终 URL 路径，最后 `download_<taskId>`。服务端名称去除路径及控制字符；Windows 校验保留名称和非法字符，记录实际发布名称。
+3. 目标设计要求文件名优先用户指定、响应 Content-Disposition、最终 URL、回退名；当前 Repository 仅使用用户名称/原 URL/回退名，响应命名及最终 URL 回传仍缺，不作为已交付。
 4. 传输流式写入、使用 64 位计数；已知总长验证实际完整长度，未知总长凭引擎正常 EOF 的持久终态进入发布，不能仅凭文件存在或比例到 100%。
 5. 补丁新增独立字节载荷 `{key, downloadedBytes, totalBytes?, sampleMonotonicMs}`，不再以已知总长为发送前提。桌面以流实际写入计数加已验证起始偏移；iOS 使用下载 delegate 的累计字节参数并校准恢复偏移，不通过百分比反推。总长未知仍发送递增字节；总长、百分比、剩余时间为 null，禁止把未知比例映射成插件失败哨兵值。
 6. pause 等待实际停止和持久回执；恢复材料存在时返回稳定 resumeRef，不因普通暂停/失败确认被清理。缺少可用材料则保留实际数据和 restartRequired 原因，后续继续先征得用户从零确认。
 7. 桌面补丁在实际恢复 GET 的响应进入文件打开/删除/写入前校验 206、Content-Range 起始与长度、验证器及本地偏移。HTTP 200、416、资源变化、弱/缺失且无法安全确认的验证器或本地材料不匹配，均停止此次恢复并返回结构化 restartRequired，原部分文件保持不变；不得走原版 isResume=false 后 FileMode.write 或 deleteTempFile 的降级路径。HEAD 预检不能代替这一步。
-8. Android 同样在响应写入前验证；iOS resume data 为系统私有材料，不自行拼偏移。须验证失效材料/资源变化时能否阻止未获确认的从零传输；若系统路径不能满足，不声称有限补丁已解决，停止扩大实现并报告该平台限制。只有用户确认 restartFromZero 后才能新建代次、清理本任务旧材料并从头请求。
+8. Android 同样在响应写入前验证；iOS resume data 为系统私有材料，不自行拼偏移。须验证失效材料/资源变化时能否阻止未获确认的从零传输；若系统路径不能满足，不声称有限补丁已解决，停止扩大实现并报告该平台限制。用户确认后原子退休旧执行/新建代次仍待引擎接口；当前 Repository 返回 restartUnsupported，不清理旧材料、不从零请求。
 
 速度由同一执行键下的单调时间和累计字节增量计算；首次样本、重新关联、恢复或计数基准变化时重置窗口，不跨进程比较时间戳。未知总长、无新样本或速度不稳定时剩余时间为 null；字节计数仍保留真实值，不能显示虚构零值。暂停不可续传资源也须实际停止，继续时等待从头下载确认。
 
@@ -475,7 +477,7 @@ DirectoryLocation 的 systemDownloads 在 Android 映射到公共 `Download/Down
 | --- | --- |
 | Dart 单元 | DTO 和完整执行键；未知总长字节非零且递增，比例/剩余时间为 null；恢复/换进程重置速度窗口；旧代次和旧版本去重 |
 | Repository / 引擎契约 | 空快照握手；固定命令 key/版本；旧命令迟到不作用于新执行；重复 commandId 幂等；业务提交前不得确认，确认失败重放不重复副作用；暂停 Future 等实际停止和持久提交 |
-| SQLite | v1 全部约束、重复 requestId、64 位偏移；回执确认高水位与业务状态同事务，回滚不提前确认；删除任务不级联确认行；迁移不丢数据 |
+| SQLite | v2 四表全部约束、原输入/迁移、重复 requestId、64 位偏移；回执确认高水位与业务状态同事务，回滚不提前确认；删除任务不级联确认行；迁移不丢数据 |
 | Widget | 重下/删除确认、publicationUncertain 与清理失败反馈、字节进度未知值、处理中、中文语义、大字体、键盘和窗口 |
 | HTTP 可控服务 | 无长度慢响应在完成前持续更新累计字节；恢复 GET 的 200/206/416、错误 Content-Range、强/弱/变化 ETag、本地材料损坏；拒绝时旧部分文件长度和散列不变，收到从头确认前新代次请求数为 0 |
 | 回执故障注入 | 持久接收后 Dart 读取前、读取后 AppStore 提交前、提交后确认前分别终止；重开可重放且只对齐一次；零重试失败后 resumeRef 及材料仍在；较旧确认不删新材料 |
@@ -541,7 +543,7 @@ iOS 重新打开 → 查询系统任务 → 关联与同步 → 不重复提交
 
 1. 先实现并验证最小执行补丁与文件契约：持久收件箱的读取/确认、失败材料保留、未知总长累计字节、桌面恢复 GET 写入前拒绝、空快照会话握手和平台发布操作恢复。不以原版插件行为或文档修订代替验证。
 2. 四平台最小原型固定补丁来源、完成依赖解析和 release 构建；在默认目录及至少一个可支持的用户目录执行上述故障注入，并验证 iOS 安全续传及 Android 停止/禁止自动重启。未通过前不批量铺页面，不把不明提供方当已支持。
-3. 固化 EngineTask/Command/Receipt/Snapshot/Ack、PublishOperation 与 AppStore v1；先完成恢复对齐、清理和确认重放，再实现共享页面、任务操作、配置、设置及系统打开。
+3. 固化 EngineTask/Command/Receipt/Snapshot/Ack、PublishOperation 与 AppStore v2；先完成恢复对齐、清理和确认重放，再实现共享页面、任务操作、配置、设置及系统打开。
 4. 对照所有验收项跑平台矩阵并更新最终接口。iOS 若无法满足关键门槛，明确报告并由用户决定取舍；不能静默减功能或宣称有限补丁必然解决系统限制。
 
 用户已批准以本设计进入任务实施；最低系统版本、Android 独立执行适配，以及 iOS 外部目录不可用时先暂存再发布均作为实施验证基线，仍须通过平台验收。若实际能力迫使改变需求或安全契约，再向用户报告并决定取舍。iOS 系统终止后允许系统继续既有任务的规则已批准。
@@ -556,7 +558,7 @@ iOS 重新打开 → 查询系统任务 → 关联与同步 → 不重复提交
 | P2 Android 执行身份 | 空快照握手、固定 key/commandId/期望版本、拒绝旧身份 | 首次空列表、Activity 重连、旧会话/代次/版本请求 |
 | P2 桌面静默重下 | 明确要求补丁在实际 GET 写入前拒绝不安全恢复 | 返回 200/坏 Range/变化 ETag 时原部分文件不变 |
 
-上表为原设计审查要求；领域/AppStore、桌面执行及FileStorage/显式私有源释放已有局部独立证据。Apple/SAF正常删除、Android提供方/v8设备、iOS/Windows/最低目标与Repository仍待完成或平台验收，不能视为全表闭环。
+上表为原设计审查要求；领域/AppStore、桌面执行及FileStorage/显式私有源释放已有局部独立证据。Apple/SAF正常删除、Android提供方/v8设备、iOS/Windows/最低目标仍待平台验收，Repository 已局部通过但从零重下、响应命名/最终 URL 仍缺，不能视为全表闭环。
 
 ## 调研依据
 

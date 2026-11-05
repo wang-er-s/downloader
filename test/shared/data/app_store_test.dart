@@ -18,8 +18,8 @@ void main() {
   });
   tearDown(() => store.close());
 
-  test('atomic schema creates exactly design tables and v1', () {
-    expect(db.select('PRAGMA user_version').single['user_version'], 1);
+  test('atomic schema creates exactly design tables and v2', () {
+    expect(db.select('PRAGMA user_version').single['user_version'], 2);
     expect(
       db
           .select("SELECT name FROM sqlite_master WHERE type='table'")
@@ -514,7 +514,7 @@ void main() {
     var raw = sqlite3.open(path);
     raw.execute('CREATE TABLE marker (value TEXT)');
     raw.execute("INSERT INTO marker VALUES ('kept')");
-    raw.execute('PRAGMA user_version=2');
+    raw.execute('PRAGMA user_version=99');
     raw.close();
     try {
       expect(

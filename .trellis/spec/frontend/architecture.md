@@ -4,7 +4,7 @@
 
 下载管理器页面数量有限，但下载生命周期、任务恢复和文件访问必须独立于页面。采用按功能组织目录、MVVM 式职责划分及 Repository/Service 分层；Riverpod 管理界面状态与依赖，复杂业务按需提取 UseCase。
 
-该分层决策已确认；领域/执行 DTO、DownloadEngine、FileStorage 与 AppStore v1 已实现，见[持久化契约](persistence.md)。PluginEngine 与固定补丁见[插件契约](plugin-engine.md)；Android 新下载、公开 resume、取消及 FGS 修复有局部独立证据。用户目录发布和 completed 显式源释放已有生产实现，工厂、日志版本、锁、取消与 ack 顺序集中见[文件契约](file-storage.md)。Repository/Riverpod/业务 UI 未实现，完整平台与 PRD 仍未验收，macOS 当前 host 不能代表 iOS/Windows/最低版本。
+该分层决策已确认；领域/执行 DTO、DownloadEngine、FileStorage 与 AppStore v2 与三个 Repository 已实现，见[持久化契约](persistence.md)。PluginEngine 与固定补丁见[插件契约](plugin-engine.md)；Android 新下载、公开 resume、取消及 FGS 修复有局部独立证据。用户目录发布和 completed 显式源释放已有生产实现，工厂、日志版本、锁、取消与 ack 顺序集中见[文件契约](file-storage.md)。Repository 局部独立 PASS，真实签名与取消/事务边界见[仓库契约](repositories.md)；Riverpod/Provider/业务 UI 未实现，完整平台与 PRD 仍未验收，macOS 当前 host 不能代表 iOS/Windows/最低版本。
 
 平台范围为必需支持 Android、macOS、Windows，并争取同步提供 iOS。共享业务接口不能绑定 Android 专用通道或数据库；优先复用跨平台实现，仅在平台边界适配执行、目录和文件打开。iOS 系统托管后台任务例外已获用户确认：关联既有任务并同步状态，不主动重新提交失败或取消任务；用户强制退出按系统取消行为处理。具体跨平台方案见 [设计文档](../../../.agents/specs/download-manager/design.md)，其技术选型仍须通过设计审核及平台验证。
 
@@ -52,7 +52,7 @@ lib/
 
 ### 2. Signatures
 
-下列暂停及回执对齐签名中，DownloadEngine 已有抽象接口，Controller/Repository 仍待接入；完整数据结构和 SQLite v1 见[设计文档](../../../.agents/specs/download-manager/design.md)，现有存储 API 见[持久化契约](persistence.md)。不新增对外 HTTP API 或环境变量。
+DownloadEngine 与 Repository 已接入，Controller 仍待实现；完整数据结构和 SQLite v2 见[设计文档](../../../.agents/specs/download-manager/design.md)，实际 API 见[持久化契约](persistence.md)及[仓库契约](repositories.md)。不新增 HTTP API 或环境变量。
 
 | 所属对象 | 最小签名 |
 | --- | --- |
@@ -67,13 +67,13 @@ lib/
 
 ### 3. Contracts
 
-- `taskId` 必须非空且对应已有任务。首次暂停仅对可暂停的活动任务生效；已暂停任务重复暂停为幂等成功，其他不可暂停状态不得下发引擎操作。稳定枚举为 DownloadStatus，端到端状态校验由后续 Repository 接入。
+- `taskId` 必须非空且对应已有任务。首次暂停仅对可暂停的活动任务生效；已暂停任务重复暂停为幂等成功，其他不可暂停状态不得下发引擎操作。稳定枚举为 DownloadStatus，Repository 已接入状态校验。
 - `watchTasks()` 订阅后提供当前快照，再发布变化。列表及元素对消费者不可变；同一任务只有一个稳定标识，分类和数量从此流派生。
 - Controller 按 taskId 调用 Repository；Repository 校验时捕获完整执行键、会话及期望回执版本，保存稳定 commandId，再调用引擎。适配器不在发送/重试时将旧命令重绑当前代次；相同 commandId 幂等，不同载荷拒绝。
 - 暂停成功需确认传输停止、保留续传数据，并完成所需的暂停状态持久化。操作的 Future 只有在这些条件满足后才能成功完成；失败则以异常完成，由界面处理。
 - Repository 的数据流反映实际结果，不在点击时提前发布“已暂停”。操作等待期间可显示处理中，并避免重复提交同一任务操作；不得用临时界面状态覆盖实际任务状态。
 - 引擎成功但持久化失败：流中如实展示已暂停的运行状态，操作仍报告保存失败及恢复风险；不能伪装全部成功，也不能为掩盖失败自动重新下载。
-- 已定义 DownloadFailure/FailureCode；平台及 SQLite 原始异常由后续 Repository/适配边界转换为可供界面处理的失败信息，区分引擎和持久化失败。不得通过匹配原始报错字符串控制流程。
+- 已定义 DownloadFailure/FailureCode；平台及 SQLite 原始异常由 Repository/适配边界转换为可供界面处理的失败信息，区分引擎和持久化失败。不得通过匹配原始报错字符串控制流程。
 - 引擎先持久保存暂停回执及材料，再交付；inspect 是非破坏性读取。Repository 在同一事务提交业务状态及确认高水位，然后 acknowledge；写入失败不确认，确认失败可重放，不重新传输。任务移除后最后确认行仍保留至安全回收。
 - 暂停/失败的普通确认不释放恢复材料；插件 autoCleanDatabase=false 不能替代原生读取/确认和资源生命周期补丁。只在已提交的取消、确认重下或发布完成意图下，显式释放归属匹配的恢复引用，旧确认不能删除新材料。
 - EngineEvent 独立提供累计 downloadedBytes 和 totalBytes?；未知总长不能停发字节，也不能通过比例反推。速度使用同执行的单调时间样本，换进程/恢复时重置窗口；未知总长的比例与剩余时间为 null。
@@ -158,8 +158,8 @@ Future<void> pause(String taskId) async {
 
 - 引擎：固定 9.5.9 补丁及 PluginEngine 已实现；桌面日志跨 isolate 串行写入、prefix 安全恢复、未知长度字节、确认及故障回归已独立复核，见[插件执行契约](plugin-engine.md)。周期/停止全文件扫描已用固定块有界摘要替代，并独立实测超过 4GiB 的 HTTP 落盘、暂停及内容核验；恢复仍线性认证磁盘 prefix，不能将局部通过视作整个插件子任务验收。
 - 平台：iOS 私有 resume 安全、原生材料释放/临时文件保护失败及真机生命周期，Windows 实机、最低版本、默认目录/持久授权/系统打开仍待验证；Android/桌面不得自动恢复，iOS 不重复提交。
-- 存储：AppStore v1 与确认行已落库；执行侧独立日志不写业务表。用户目录发布恢复及 completed 源释放已接入，必须核对实际业务提交；不假定 URI/文件身份稳定，能力限制及删除功能缺口见[文件契约](file-storage.md)。
-- 依赖与发布：sqlite3 3.5.2、path_provider 2.1.6、固定 9.5.9 path 插件已锁定；原生目录选择已接线，Riverpod/Repository/UI 仍待实现。macOS host12、iOS前轮host15只证明相应主机边界，仓库最低10.15/14及Windows未验收。
+- 存储：AppStore v2 与确认行已落库；执行侧独立日志不写业务表。用户目录发布恢复及 completed 源释放已接入，必须核对实际业务提交；不假定 URI/文件身份稳定，能力限制及删除功能缺口见[文件契约](file-storage.md)。
+- 依赖与发布：sqlite3 3.5.2、path_provider 2.1.6、固定 9.5.9 path 插件已锁定；原生目录选择已接线，Repository 已实现；Riverpod/Provider/UI 仍待实现。macOS host12、iOS前轮host15只证明相应主机边界，仓库最低10.15/14及Windows未验收。
 
 ## Android 执行协议、Service 与私有暂存（主机局部通过）
 
