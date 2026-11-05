@@ -31,20 +31,25 @@ final class PluginEngine implements DownloadEngine {
         );
     root.createSync(recursive: true);
     final database = sqlite3.open('${root.path}/commands.sqlite');
-    final version = database.select('PRAGMA user_version').single.values.single;
-    if (version != 0 && version != 1 && version != 2) {
-      database.close();
-      throw PluginEngineException(
-        DownloadFailure(
-          code: FailureCode.protocolMismatch,
-          message: '执行日志版本不支持',
-        ),
-      );
-    }
-    database.execute('PRAGMA synchronous=FULL');
-    database.execute('BEGIN IMMEDIATE');
+    PluginEngine? openingEngine;
     try {
-      database.execute('''
+      final version = database
+          .select('PRAGMA user_version')
+          .single
+          .values
+          .single;
+      if (version != 0 && version != 1 && version != 2) {
+        throw PluginEngineException(
+          DownloadFailure(
+            code: FailureCode.protocolMismatch,
+            message: '执行日志版本不支持',
+          ),
+        );
+      }
+      database.execute('PRAGMA synchronous=FULL');
+      database.execute('BEGIN IMMEDIATE');
+      try {
+        database.execute('''
       CREATE TABLE IF NOT EXISTS executions (
         id TEXT PRIMARY KEY, input TEXT NOT NULL, plugin_task TEXT NOT NULL
       );
@@ -62,67 +67,89 @@ final class PluginEngine implements DownloadEngine {
       );
       PRAGMA user_version=2;
     ''');
-      database.select('SELECT id,ref,members FROM complete_sources LIMIT 0');
-      database.select('SELECT id,ack,done FROM material_releases LIMIT 0');
-      database.execute('COMMIT');
-    } catch (_) {
-      database.execute('ROLLBACK');
-      database.close();
-      rethrow;
-    }
-    final engine = PluginEngine._(
-      root,
-      database,
-      store,
-      plugin.FileDownloader(),
-    );
-    engine._downloader.registerCallbacks(
-      group: _group,
-      taskStatusCallback: (_) => engine._poll(),
-      taskProgressCallback: (_) => engine._poll(),
-    );
-    await engine._downloader.ready;
-    await engine._downloader.start(
-      doTrackTasks: false,
-      doRescheduleKilledTasks: false,
-      markDownloadedComplete: false,
-      autoCleanDatabase: false,
-    );
-    if (!Platform.isIOS) {
-      final active = (await engine._downloader.allTasks(
-        allGroups: true,
-      )).map((t) => t.taskId).toSet();
-      for (final row in database.select('SELECT * FROM executions')) {
-        final task = plugin.DownloadTask.fromJson(
-          jsonDecode(row['plugin_task'] as String),
-        );
-        final latest = plugin.ExecutionJournal.latest(
-          engine._directory(task.taskId),
-        );
-        if (latest != null &&
-            !active.contains(task.taskId) &&
-            [0, 1].contains(latest['status'])) {
-          await engine._downloader.recordExecution(task, {'detached': true});
+        database.select('SELECT id,ref,members FROM complete_sources LIMIT 0');
+        database.select('SELECT id,ack,done FROM material_releases LIMIT 0');
+        database.execute('COMMIT');
+      } catch (_) {
+        try {
+          database.execute('ROLLBACK');
+        } catch (_) {
+          // Rollback cleanup must not replace the original initialization error.
+        }
+        rethrow;
+      }
+      final engine = PluginEngine._(
+        root,
+        database,
+        store,
+        plugin.FileDownloader(),
+      );
+      openingEngine = engine;
+      if (_callbackOwner != null) engine._conflict('engineAlreadyOpen');
+      _callbackOwner = engine;
+      engine._downloader.registerCallbacks(
+        group: _group,
+        taskStatusCallback: engine._statusCallback,
+        taskProgressCallback: engine._progressCallback,
+      );
+      await engine._downloader.ready;
+      await engine._downloader.start(
+        doTrackTasks: false,
+        doRescheduleKilledTasks: false,
+        markDownloadedComplete: false,
+        autoCleanDatabase: false,
+      );
+      if (!Platform.isIOS) {
+        final active = (await engine._downloader.allTasks(
+          allGroups: true,
+        )).map((t) => t.taskId).toSet();
+        for (final row in database.select('SELECT * FROM executions')) {
+          final task = plugin.DownloadTask.fromJson(
+            jsonDecode(row['plugin_task'] as String),
+          );
+          final latest = plugin.ExecutionJournal.latest(
+            engine._directory(task.taskId),
+          );
+          if (latest != null &&
+              !active.contains(task.taskId) &&
+              [0, 1].contains(latest['status'])) {
+            await engine._downloader.recordExecution(task, {'detached': true});
+          }
         }
       }
-    }
-    // Historical samples remain inspectable, but are not fresh observations
-    // in this process's monotonic clock domain.
-    for (final receipt in engine._snapshot().receipts) {
-      final id = engine._id(receipt.key);
-      engine._delivered[id] = max(
-        engine._delivered[id] ?? 0,
-        receipt.receiptVersion,
+      // Historical samples remain inspectable, but are not fresh observations
+      // in this process's monotonic clock domain.
+      for (final receipt in engine._snapshot().receipts) {
+        final id = engine._id(receipt.key);
+        engine._delivered[id] = max(
+          engine._delivered[id] ?? 0,
+          receipt.receiptVersion,
+        );
+      }
+      engine._timer = Timer.periodic(
+        const Duration(milliseconds: 200),
+        (_) => engine._poll(),
       );
+      return engine;
+    } catch (_) {
+      try {
+        if (openingEngine != null) {
+          await openingEngine.close();
+        } else {
+          database.close();
+        }
+      } catch (_) {
+        // Preserve the initialization failure even when teardown also fails.
+      }
+      rethrow;
     }
-    engine._timer = Timer.periodic(
-      const Duration(milliseconds: 200),
-      (_) => engine._poll(),
-    );
-    return engine;
   }
 
   static const _group = 'downloader.execution.v1';
+  static PluginEngine? _callbackOwner;
+  void _statusCallback(plugin.TaskStatusUpdate _) => _poll();
+  void _progressCallback(plugin.TaskProgressUpdate _) => _poll();
+  Future<void>? _closing;
   final Directory _root;
   final Database _commands;
   final AppStore _store;
@@ -898,13 +925,30 @@ final class PluginEngine implements DownloadEngine {
   }
 
   /// Application teardown only; a View must never own this adapter's lifetime.
-  Future<void> close() async {
+  Future<void> close() => _closing ??= _close();
+  Future<void> _close() async {
     _timer?.cancel();
-    await _tail;
-    _downloader.unregisterCallbacks(group: _group);
-    await _events.close();
-    _publicationJournal?.close();
-    _commands.close();
+    if (identical(_callbackOwner, this)) {
+      _downloader.unregisterCallbacks(group: _group, callback: _statusCallback);
+      _downloader.unregisterCallbacks(
+        group: _group,
+        callback: _progressCallback,
+      );
+      _callbackOwner = null;
+    }
+    try {
+      await _tail;
+    } finally {
+      try {
+        await _events.close();
+      } finally {
+        try {
+          _publicationJournal?.close();
+        } finally {
+          _commands.close();
+        }
+      }
+    }
   }
 }
 

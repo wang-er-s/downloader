@@ -6,7 +6,7 @@
 
 依据：[需求文档](requirements.md)、[需求评审](review.md)、[Flutter 架构规范](../../../.trellis/spec/frontend/architecture.md)。截图仅作为界面与交互参考，不扩展代理、分享、认证资源、视频解析、搜索、批量管理等首期范围。
 
-**状态：用户已批准实施；领域/AppStore v2、三个 Repository、引擎及 FileStorage/完成源显式释放已有局部独立证据，完整 FileStorage PRD 仍 BLOCK/in_progress。** 当前 Plugin commands.sqlite v2、Android execution v8，发布日志分别 publications.sqlite v1/android_publications_v1.db v1。工厂、目录、创建前意图、只读恢复、不覆盖、取消 cleanup→原 cancel 重放及 completed 同事务 ack 详见[文件契约](../../../.trellis/spec/frontend/file-storage.md)。最新57 focused（55桥＋2锁）、macOS5引擎＋9文件真实集成、93 JVM独立--rerun-tasks、analyze通过；22 Android instrumentation本轮仅编译。旧API37 v7的20 SQLite＋7 Runtime（绕过MethodChannel）为历史通过，不证明v8。Apple/SAF现存目标删除和用户目录临时副本回收为功能缺口；Windows缺环境，macOS host12/iOS前轮host15不证明最低10.15/14。Repository 局部独立 PASS：141 项（36 仓库＋105 既有）、analyze clean、1 项真实 macOS smoke（总 GET=2，重开零新增）；Riverpod/Provider/业务 UI 未实现，实际协调契约见[仓库规范](../../../.trellis/spec/frontend/repositories.md)。用户负责Android实机，不阻塞其他功能。
+**状态：用户已批准实施；领域/AppStore v2、三个Repository、Engine/FileStorage与Riverpod业务UI已有局部独立证据，完整UI/FileStorage任务仍BLOCK/in_progress。** Plugin commands.sqlite v2、Android execution v8，发布日志publications.sqlite v1/android_publications_v1.db v1不变。前序文件阶段57 focused、macOS5引擎＋9文件集成、93 JVM通过；Android v8的22 instrumentation仅编译，旧v7设备结果不证明v8。Repository阶段141项及1项真实macOS smoke（GET=2、重开零新增）为历史局部证据。UI最终analyze、155 Flutter、2 Plugin真实macOS集成、1真实UI smoke通过（GET=1、557056字节paused且SQLite一致），详见[UI契约](../../../.trellis/spec/frontend/ui.md)。host12仅临时目标，不证明最低10.15；iOS/Windows/最低版本未验收。速度/ETA未知、restartUnsupported、响应命名/最终URL、Apple/SAF删除及Apple临时副本仍缺；Windows退出未接线，macOS红钮/Quit未实际操作，系统截图黑屏不算通过。Android实机由用户负责，PRD不勾选。
 
 ### 已确认的生命周期差异
 
@@ -20,8 +20,8 @@ iOS 用户主动在多任务界面强制退出会触发系统取消后台传输�
 
 ### 当前代码与改动范围
 
-- `lib/main.dart` 只有 `MyApp`、`MyHomePage`、`_MyHomePageState`；保留 Flutter 入口和平台工程，替换计数器首页。
-- `test/widget_test.dart` 仍是计数器测试，界面子任务后续替换；领域/DTO 与真实 SQLite 基础测试 48 项通过，另有插件并发、真实 HTTP 与 macOS 集成。`pubspec.yaml` 精确引入 sqlite3 3.5.2、path_provider 2.1.6 和显式 path 9.5.9 插件。
+- `lib/main.dart` 已改为ensureInitialized后runApp(MyApp)，导出app入口；MyApp在应用级初始化完成后注入真实依赖，错误页提供显式retry，不再使用计数器首页。
+- `test/widget_test.dart` 已替换为业务Widget/Provider回归；真实集成另见integration_test/download_ui_test.dart及plugin_engine_test.dart。依赖实际解析flutter_riverpod 3.4.3，sqlite3 3.5.2、path_provider 2.1.6和固定path 9.5.9插件不变。
 - 四个平台工程均已存在，不能将“工程存在”当成下载能力已经支持。
 - Android 的 `MainActivity.kt` 接入进程持有的通道；`AndroidEngine` 桥接核验 AppStore 已提交业务确认。新下载/公开 resume 生产链共用通道 → 串行 TransferCoordinator → 当前进程 ServiceLifecycle token → DownloadService → 最多两个 HttpTransfer/ResumeTransfer worker → 独立 SQLite → EngineEvent；同执行一 worker，Activity detach 只解绑监听。原生日志当前 user_version=8 保留 v1–v7 历史，既有 resume_sources、active_branches、retired_workers、cancel_cleanups/cancel_cleanup_members 之外新增 completed_sources。acceptResume 同事务核验真实 session/完整命令/key/head/原生 input/材料归属，冻结历史 source N，保存 queued N+1、不可变接受结果和独立新 worker 授权；仅显式当前 session 用户命令且 Runtime 无 Work 才退休旧未 finished 授权，不伪造 finished。inspect/open/重连/旧 Intent/NULL 未知结果不退休、不联网。Service 保持 exported=false/dataSync/START_NOT_STICKY，实例/token/idle epoch 重验，无自动恢复；Manifest 已声明联网、FGS类型及通知权限，通知请求 UI 未实现，release 仍为 debug 签名。Stop 保持 CANCEL>PAUSE，pause 等待实际退出、force/close与持久终态。恢复每个 GET前/候选登记/proof/staged 回调重验冻结 source、root ref、完整执行键与新 worker/head；一次性请求意图先于实际 Range/If-Range GET，206/强 ETag/Range/总长/长度不安全不创建候选。安全响应后先登记 UUID payload/facts，再排他创建并复制/复验 prefix、追加 suffix，原件及未提交 tail/旧 candidate 不截断删除。onSample 不认证 offset；候选完整 prefix 经双 force 或最终双 close 的认证事务才晋升 active branch，持久 CANCEL 不推进 proof，持久 PAUSE/CANCEL 在 staged 事务仍优先。关闭/Journal失败不能伪报暂停成功。终态补存失败保留本进程冻结入口，原完整 enqueue/resume/pause 显式重发仅补本地提交，无新 GET/copy/candidate；kill 后只承认持久事实。历史终态重放使用该历史 receipt 已提交的派生恢复字段，不受新 branch 污染；其余字段/命令仍精确比较。无安全 proof/强 ETag 或 known total且offset==total 仍 restartRequired，不自动重下或本地发布。普通/旧 ack 不删源；当前 completed 的显式 complete: 集合引用释放已接入，精确事务与释放校验见文件契约，不能推广为任意非空引用均可释放。显式 cancel 先事务保存取消意图和原件/全部候选双文件清单，再 CANCEL 并等真实退出/关闭/终态落库；删除前双向重验 root/命令/候选proof归属及整集合 canonical/UUID/NOFOLLOW，逐成员删除/done 后首次提交 cleanup.result。部分删除/保存失败保留 pending，原完整 cancel 显式重放只补存/清理，不新增 GET；普通/旧 ack 不删除材料，真实关闭失败阻止原 cancel 清理成功。完成回执仍 cancelling/error=null，不代表业务列表已移除。完整私有文件只到 publishing。Service每次交付通过deliver先实际promotion、再独立校验下载授权；系统接受启动后PAUSE/CANCEL/通知撤权不能跳过promotion直接停止，promotion也不复活worker。POST_NOTIFICATIONS并非系统FGS前置，产品仍拒绝无通知权限的传输。promotion失败按acceptsFailure和destroy所属集合报告，旧实例不得失败新实例已claim但尚未ready的任务。以下为旧v7/FGS阶段历史证据，不是当前v8设备验收：独立93项JVM（协议5＋HTTP20＋协调器30＋生命周期12＋恢复23＋清理3）、静态分析及debug APK通过，Dart当时未改沿用前轮独立102项；20项 SQLite instrumentation 已在 API37 模拟器独立实跑，20个唯一case零失败/错误/跳过，含迁移/回滚、恢复归属与清理；标准runner逐case报结果，后台异常固定归属原case。API37已独立完成7项Runtime/Service设备case：真实Activity detach/重开仍增长，pause后静止、Range/If-Range实际206、cancel删除完整原件/候选双文件；启动接受后PAUSE/CANCEL/真实通知撤权零新增HTTP/材料/字节，等待12秒无FGS超时。外部HTTP恰3次，seedKill仅准备，跨强杀同执行正字节记录可读且重开inspect窗口新增GET为0。脚本integration_test/android_engine_runtime_check.py及/tmp/android-fgs-race-independent/保存证据；夹具绕过MethodChannel编码，完整通道/业务UI、API29/30/33/35/36真机、真实系统限制/平台promotion失败和旧实例设备故障组合、TLS/真实磁盘故障、目录fsync及超过4GiB传输仍未验收。
 - `ios/Runner/Info.plist` 是基础配置，需要核对后台会话交付、明文 HTTP 策略、签名及目录授权。
@@ -68,6 +68,8 @@ flowchart TD
 
 只有执行边界需要一个最小引擎契约以选择平台实现；不预建 BaseRepository、所有类的 Interface/Impl 配对或只有转发作用的 UseCase。复杂复用规则出现后再提取 UseCase。
 
+应用组装由AppDependencies.open拥有：AppStore.openPersistent → AndroidEngine.open(store:)或PluginEngine.open(store:) → platformFileStorage（Plugin注入publicationJournal）→ SettingsRepository(defaultDownloadDirectory()) → application-support/staging_v1 → DownloadRepository.initialize → SavedDownloadRepository。AppDependencies.presentation返回具体DownloadRepository/SavedDownloadRepository/SettingsRepository/FileStorage命名record，由ProviderScope override注入；feature禁止反向import app，不增包装接口。tasks/saved/settings三个StreamProvider各订阅对应Repository流，是业务显示唯一来源；Notifier只存busy/error，分类数量从流派生。异步结算检查ref.mounted，成功不抹掉其他并发错误；cancel使用独立cancel:<id>键，允许其他操作busy及退出等待期间提交原Repository。初始化失败分别尽力清理已取得资源并保留首异常，仅用户显式retry。PluginEngine固定group单活owner、失败清理与幂等close见[插件规范](../../../.trellis/spec/frontend/plugin-engine.md)。
+
 ### 执行实现的最小选择
 
 - **iOS、macOS、Windows 复用 PluginEngine**，基于 `background_downloader` 9.5.9 的固定发布源码维护有限补丁。该版本原生回执先取后删、未知总长缺少字节事件、桌面续传可静默重下，不能把未经修改的发布包视作满足契约的实现。
@@ -79,17 +81,17 @@ flowchart TD
 
 ### 依赖与系统基线
 
-本地为 Flutter 3.44.8 / Dart 3.12.2，Android compileSdk/targetSdk 36。sqlite3、path_provider、固定插件已解析；原生目录选择已实现，没有新增 file_selector 依赖，Riverpod 仍待引入。macOS 有真实运行证据，四平台及最低版本未验收。
+本地为Flutter 3.44.8 / Dart 3.12.2，Android compileSdk/targetSdk 36。sqlite3、path_provider、固定插件及flutter_riverpod 3.4.3已解析；原生目录选择及业务UI已接入，未引入file_selector。macOS有局部真实运行证据，四平台及最低版本未验收。
 
 | 依赖 | 候选版本 | 用途 |
 | --- | --- | --- |
-| flutter_riverpod | 3.4.3 | 依赖组装、Notifier、StreamProvider；首期不要求代码生成 |
+| flutter_riverpod | 3.4.3（实际已解析） | 依赖record注入、Notifier、StreamProvider；不要求代码生成 |
 | background_downloader | 9.5.9 + 本仓库有限补丁（已接入，平台未验收） | iOS 和桌面下载适配；固定来源，Android 不向此插件提交任务 |
 | sqlite3 | 3.5.2（已精确锁定） | 四个平台共享 AppStore；当前 macOS 主机真实 SQLite 测试通过，其他平台原生资产待验证 |
 | path_provider | 2.1.6（已精确锁定） | 应用持久目录及平台下载目录定位；真实平台通道及授权待验证 |
 | file_selector | 1.1.0（原候选，未引入） | 当前使用原生目录选择通道及平台授权，不假定选择器自动提供持久授权 |
 
-background_downloader 9.6.x 要求更高 SDK，本稿不以升级 SDK 为前置条件。9.5.9 原版仅是补丁基线，不能在 pubspec 中直接锁原版后声称契约已满足；实施时记录补丁源码提交。sqlite3 原候选 3.8.0 的实际解析因 hooks → record_use 要求 meta ^1.19.0，与当前 Flutter 固定 meta 1.18.0 冲突，已改为精确 3.5.2；不使用 dependency_overrides，不升级 SDK。Riverpod 等仍需实际解析和四平台 release 构建验证。
+background_downloader 9.6.x要求更高SDK，本稿不以升级SDK为前置。9.5.9原版仅是补丁基线，固定源码及来源见插件规范，不能锁原版后声称契约满足。sqlite3原候选3.8.0因hooks→record_use要求meta ^1.19.0与当前Flutter固定meta 1.18.0冲突，实际精确3.5.2；无dependency_overrides/SDK升级。Riverpod已解析，四平台release及最低版本仍需验证。
 
 建议基线：Android 10/API 29+（简化公共下载目录）、iOS 14+（9.5.9 podspec 下限）、macOS 10.15+、Windows 10/11 64 位。它们是本稿待审核的支持基线，不是已完成兼容性认证；最终以 Flutter、传递依赖及设备验证后的共同下限为准。
 
@@ -121,13 +123,13 @@ third_party/background_downloader/    # 已引入固定 9.5.9 源码及有限补
 - 长名称可截断并查看详情；弹窗可滚动、避让软键盘；未知总长采用不确定进度，不显示虚构百分比和剩余时间。
 - 删除默认仅删除记录，删除文件需明确选择；重新下载保留原文件。读取失败显示错误和重试，不当作空态。
 
-桌面最小化保持应用运行；本稿建议关闭窗口视为退出请求，有活动任务时先确认停止并退出，正常退出前暂停并保存。macOS 的退出菜单也走同一协调流程；不增加托盘、守护进程或开机自启。强杀不保证收到退出回调，恢复依赖持久回执。
+桌面最小化保持应用运行，关闭窗口/菜单退出需确认停止并保存；macOS已接`downloader/app_lifecycle`的`requestExit`与AppLifecycleListener。Swift保留FlutterAppDelegate和原窗口委托转发，close/Quit请求合流、pending只回复一次，CFBoolean严格true才放行，数字NSNumber拒绝，approved重入放行。Dart确认后检查mounted，等待真实pause保存，最终同时重读活动任务及除exit外busy，失败拒绝并解锁、批准保留退出锁。Windows原生退出未接线；macOS系统红钮/Quit无实际操作证据，仅Dart通道fake和真实host编译，不作为系统退出验收。不增加托盘/守护或开机自启，强杀依赖持久回执。
 
 ## 组件与接口
 
 ### 1. Scope / Trigger
 
-跨越平台、数据库、执行及文件系统，必须明确命令确认和部分失败。DownloadEngine/FileStorage DTO及适配已有生产实现；Repository 已接入，Controller/Provider 仍待实现。Android v7取消/FGS为历史局部PASS，当前v8 completed释放、Plugin v2及用户目录发布已有局部证据，完整平台验收未闭环。已有入口见[持久化契约](../../../.trellis/spec/frontend/persistence.md)、[Android执行契约](../../../.trellis/spec/frontend/architecture.md)、[插件契约](../../../.trellis/spec/frontend/plugin-engine.md)、[文件契约](../../../.trellis/spec/frontend/file-storage.md)。
+跨越平台、数据库、执行及文件系统，必须明确命令确认和部分失败。DownloadEngine/FileStorage、Repository、Controller/Provider均已接入。Android v7取消/FGS为历史局部PASS，当前v8 completed释放、Plugin v2、用户目录发布及UI均有局部证据，完整平台验收未闭环。入口见[持久化契约](../../../.trellis/spec/frontend/persistence.md)、[Android执行契约](../../../.trellis/spec/frontend/architecture.md)、[插件契约](../../../.trellis/spec/frontend/plugin-engine.md)、[文件契约](../../../.trellis/spec/frontend/file-storage.md)与[UI契约](../../../.trellis/spec/frontend/ui.md)。
 
 ### 2. Signatures
 
@@ -170,7 +172,7 @@ Future<void> setTheme(AppTheme theme);
 Future<void> setDefaultDirectory(DirectoryLocation directory);
 ```
 
-上述签名按所属组件分别列出，不作为同一 Dart 文件的顶层声明。DownloadsController 保留 `Future<void> pause(String taskId)`，只处理界面操作和反馈。AppStore 提供事务化查询/保存，状态变化由 Repository 形成统一任务流。
+上述签名按所属组件分别列出，不作为同一Dart文件顶层声明。DownloadsController实际为`Future<bool> pause(String id)`，通过run维护局部busy/error并捕获错误，成功true、拒绝/失败false；Repository.pause仍为Future<void>且持久条件不变。完整UI签名见UI规范。AppStore提供事务化查询/保存，业务变化只由三个Repository流发布；四表v2与下述SQL保持一致，不为UI改变业务合同。
 
 ### 3. Contracts
 

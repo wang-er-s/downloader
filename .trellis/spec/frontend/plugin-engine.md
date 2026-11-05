@@ -29,6 +29,8 @@ Future<void> close();
 
 - 固定 background_downloader 9.5.9 归档，SHA-256 为 `ae55e127f87397b372578fc9474568b879fa78326103c342e00160558d08e527`。保留许可证、PATCHES.md 和可对新归档重放的 downloader.patch，显式 path 依赖；sqlite3 保持精确 3.5.2，不升级 SDK、不加 overrides。
 - open 先注册回调，start 关闭 doTrackTasks、doRescheduleKilledTasks、markDownloadedComplete、autoCleanDatabase，任务 retries=0；参数不能代替原生补丁。桌面重开只登记 detached/waitingRecovery，不自动 enqueue；历史字节不是新进程的单调时钟样本。
+- 固定 callback group=`downloader.execution.v1` 在当前 Dart 进程仅一个活 owner；第二次 open 返回 stateConflict/reason=engineAlreadyOpen，不接管或注销首实例回调。owner在注册前取得；ready/start/allTasks/执行日志解析任一步失败，open 尽力 close 已取得实例或 commands DB，迁移回滚/清理异常不替换首异常。
+- close 复用 `_closing` 同一 Future：停止本实例timer，仅 owner 可注销本实例的具体 status/progress回调，finally 释放事件流、已创建 publicationJournal 和 commands DB；部分初始化及重复close安全。不会reset全局插件、取消系统任务/网络或删库。应用显式重试与生命周期见[UI 契约](ui.md)。
 - `commands.sqlite` 为独立 v2 执行库，保留 executions(id,input,plugin_task)、commands(id,payload,result)、acknowledgements(id,payload)，新增 complete_sources(id,ref,members)、material_releases(id,ack,done)，synchronous=FULL。v1→v2 事务迁移保留历史，失败/未知版本留库。执行身份和 result=NULL 的未知命令结果同事务登记；结果不明先 inspect，不自动重试副作用。同 commandId/载荷重放原结果，不同载荷拒绝。
 - 每执行目录保存完整、不可变的递增 `<receiptVersion>.json`；flush 唯一 pending 后 rename 发布，再通知 Dart。桌面每次写入独立 sqlite3 连接，在 writer.sqlite 上设置 busy_timeout=30000，并以 BEGIN IMMEDIATE 串行保护 latest→merge→版本分配→flush→rename；回收使用同一门。不能用 POSIX 同进程文件锁或 isolate 内队列替代。
 - JSON 是已发布版本依据；发布后 COMMIT 失败也不能重用该版本，失败 pending 保留。回滚尽力执行并保留首个异常。不宣称 SQLite 与文件发布为同一文件系统事务，也不保证跨文件集合的事务快照。
@@ -70,6 +72,8 @@ Future<void> close();
 以上为插件阶段历史证据。后续 FileStorage/completed 释放最新独立结果为57 focused（55桥＋2真实锁）、macOS5引擎＋9文件集成、93 JVM 强制重跑及 analyze 干净；覆盖异步业务取消竞争、晚目录零删除、done/最终 ack 失败重开与双 isolate 门。Android v8 的22设备夹具仅编译；完整平台边界见[文件契约](file-storage.md)。
 
 Repository 最新独立交付为 141 项（36 仓库＋105 既有）、analyze clean、1 项真实 macOS smoke：完成与未完成两项总 GET=2，重开零新增 GET/发布。本轮文档同步沿用 delivery 日志，不重跑产品测试；不扩展为 iOS/Windows/最低版本验收，详情见[仓库契约](repositories.md)。
+
+UI轮新增独立真实macOS Plugin集成后最终2项通过：已注册回调后损坏日志解析失败会清理回调，修复数据后显式retry成功、重复close安全；已有owner遇第二实例拒绝时，两回调对象保持原实例。复用 `/tmp/download-ui-check-final-plugin.log`/`.exit`（exit0），host12仅临时目标；本轮文档同步不重跑产品测试，不扩展为插件整任务或四平台通过。
 
 - 强验证器/Range/总长/本地损坏、未知长度 EOF 前增长、真实暂停继续、失败 pending、复制故障与重试；copying、旧引用及原件 hash 必须保留。
 - 三处交付中断是适配器重建与真实 SQLite 故障注入；确认前未提交拒绝，旧确认/恶意路径/symlink/非法晚成员不误删材料；不能称作三次 OS 强杀。

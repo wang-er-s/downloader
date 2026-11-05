@@ -2,7 +2,7 @@
 
 ## 1. Scope / Trigger
 
-适用于 [FileStorage](../../../lib/shared/platform/file_storage.dart)、[平台工厂](../../../lib/shared/platform/platform_file_storage.dart)、[NativeFileStorage](../../../lib/shared/platform/native_file_storage.dart) 和执行侧 [PublicationJournal](../../../lib/features/downloads/data/publication_journal.dart)。发布与 completed 显式私有源释放已有生产实现及 macOS 局部独立证据；完整 FileStorage PRD 仍 BLOCK/in_progress。三个 Repository 已接入并局部独立 PASS，见[仓库契约](repositories.md)；Riverpod/Provider/业务 UI 尚未实现。Android 实机由用户负责，不阻塞其他功能。
+适用于 [FileStorage](../../../lib/shared/platform/file_storage.dart)、[平台工厂](../../../lib/shared/platform/platform_file_storage.dart)、[NativeFileStorage](../../../lib/shared/platform/native_file_storage.dart) 和执行侧 [PublicationJournal](../../../lib/features/downloads/data/publication_journal.dart)。发布与 completed 显式私有源释放已有生产实现及macOS局部独立证据；完整 FileStorage PRD 仍 BLOCK/in_progress。三个[仓库](repositories.md)与[UI](ui.md)已接入并局部独立 PASS；不代表全部目录授权/打开/删除或平台验收。Android实机由用户负责。
 
 ## 2. Signatures
 
@@ -26,6 +26,8 @@ Map<String, Object?>? findFile(FileLocation file);
 ```
 
 Apple/Windows 使用 `platformFileStorage(journal: pluginEngine.publicationJournal)`，缺 journal 拒绝；Android 工厂返回 AndroidFileStorage，原生执行侧授权与写日志，通道 `downloader/file_storage`。没有新增共享 DTO/API、依赖或环境变量。
+
+应用的 AppDependencies.open 在取得 Engine 后创建平台 FileStorage；PluginEngine 的 publicationJournal 原样注入工厂，随后将同一 storage 注入 DownloadRepository 和 presentation record。UI目录选择经 Controller 调用该 storage，不旁路新增发布写入方；页面退订不关闭 storage/Engine。选择取消保持原目录，Apple/SAF删除及Apple用户目录临时副本回收缺口仍保留。
 
 | 执行侧数据库 | 当前结构与迁移 |
 | --- | --- |

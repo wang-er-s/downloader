@@ -4,7 +4,7 @@
 
 下载管理器页面数量有限，但下载生命周期、任务恢复和文件访问必须独立于页面。采用按功能组织目录、MVVM 式职责划分及 Repository/Service 分层；Riverpod 管理界面状态与依赖，复杂业务按需提取 UseCase。
 
-该分层决策已确认；领域/执行 DTO、DownloadEngine、FileStorage 与 AppStore v2 与三个 Repository 已实现，见[持久化契约](persistence.md)。PluginEngine 与固定补丁见[插件契约](plugin-engine.md)；Android 新下载、公开 resume、取消及 FGS 修复有局部独立证据。用户目录发布和 completed 显式源释放已有生产实现，工厂、日志版本、锁、取消与 ack 顺序集中见[文件契约](file-storage.md)。Repository 局部独立 PASS，真实签名与取消/事务边界见[仓库契约](repositories.md)；Riverpod/Provider/业务 UI 未实现，完整平台与 PRD 仍未验收，macOS 当前 host 不能代表 iOS/Windows/最低版本。
+领域/执行 DTO、DownloadEngine、FileStorage、AppStore v2、三个 Repository 与 Riverpod/Provider/业务 UI 已实现并有局部独立证据。持久化、执行、文件与仓库边界分别见[持久化契约](persistence.md)、[插件契约](plugin-engine.md)、[文件契约](file-storage.md)、[仓库契约](repositories.md)；实际应用组装与 UI 断言见[UI 契约](ui.md)。完整平台与 PRD 仍 BLOCK/in_progress，macOS host12 不代表 iOS/Windows/最低版本或系统退出验收。
 
 平台范围为必需支持 Android、macOS、Windows，并争取同步提供 iOS。共享业务接口不能绑定 Android 专用通道或数据库；优先复用跨平台实现，仅在平台边界适配执行、目录和文件打开。iOS 系统托管后台任务例外已获用户确认：关联既有任务并同步状态，不主动重新提交失败或取消任务；用户强制退出按系统取消行为处理。具体跨平台方案见 [设计文档](../../../.agents/specs/download-manager/design.md)，其技术选型仍须通过设计审核及平台验证。
 
@@ -39,7 +39,8 @@ lib/
 
 ### Riverpod 与生命周期
 
-- Provider 组装依赖，StreamProvider 订阅 Repository 的任务流，Notifier 类暴露操作及必要界面状态。具体 Riverpod API 和版本在引入依赖时确认。
+- flutter_riverpod 实际解析为 3.4.3；app 的 `AppDependencies.presentation` 注入 `PresentationDependencies` 命名 record，字段为具体 DownloadRepository、SavedDownloadRepository、SettingsRepository 与 FileStorage。feature 禁止反向导入 app；不新增包装接口。
+- tasksProvider/savedProvider/settingsProvider 分别订阅三个 Repository 流，是业务显示唯一来源；Notifier 的 OperationState 仅存 busy/error。取消使用独立 `cancel:<id>` 键，普通操作 busy 与退出等待不能屏蔽取消；最终取消顺序由 Repository 决定。异步返回写 state 前检查 ref.mounted，成功结算保留其他并发操作的错误。
 - 输入框、当前分类等局部状态可以留在 Widget；下载中、已完成列表及数量由统一任务集合派生。
 - 下载引擎及必要的同步、持久化由应用级或平台生命周期持有。页面取消订阅或 Provider 释放只能释放界面资源，不能取消后台下载。
 - Riverpod 不承担各平台后台执行保证。回到前台时，Repository 应重新对齐引擎和持久化记录，避免仅凭旧内存快照显示任务状态。
@@ -52,11 +53,11 @@ lib/
 
 ### 2. Signatures
 
-DownloadEngine 与 Repository 已接入，Controller 仍待实现；完整数据结构和 SQLite v2 见[设计文档](../../../.agents/specs/download-manager/design.md)，实际 API 见[持久化契约](persistence.md)及[仓库契约](repositories.md)。不新增 HTTP API 或环境变量。
+DownloadEngine、Repository 与 Controller 已接入；完整数据结构和 SQLite v2 见[设计文档](../../../.agents/specs/download-manager/design.md)，API 见[仓库契约](repositories.md)和[UI 契约](ui.md)。不新增 HTTP API 或环境变量。
 
 | 所属对象 | 最小签名 |
 | --- | --- |
-| DownloadsController | `Future<void> pause(String taskId)` |
+| DownloadsController | `Future<bool> pause(String id)`；true 为操作成功，false 为拒绝或捕获失败 |
 | DownloadRepository | `Stream<List<DownloadTask>> watchTasks()` |
 | DownloadRepository | `Future<void> pause(String taskId)` |
 | DownloadEngine | `Future<EngineReceipt> pause(EngineCommand command)` |
@@ -121,23 +122,20 @@ DownloadEngine 与 Repository 已接入，Controller 仍待实现；完整数据
 
 ### 7. Wrong vs Correct
 
-以下是 Controller 内的方法片段示意，假定 `repository` 已注入；UI 必须处理异步失败。
+以下为已实现 Controller 的调用方式，`run` 负责 busy/error 及异步返回后的 ref.mounted 检查。
 
-错误：点击时先改页面副本，未等执行成功就显示暂停。
+错误：点击即修改页面任务副本，或同任务 busy 时禁用所有入口而阻止 cancel 到 Repository。
 
-```dart
-Future<void> pause(String taskId) async {
-  markTaskPausedInLocalList(taskId);
-  await repository.pause(taskId);
-}
-```
-
-正确：等待 Repository 执行，通过订阅任务流呈现实际状态；操作中的提示与任务状态分开。
+正确：等待 Repository，渲染只读任务流；cancel 有独立键且允许退出等待期间提交。
 
 ```dart
-Future<void> pause(String taskId) async {
-  await repository.pause(taskId);
-}
+Future<bool> pause(String id) =>
+    run(id, () => dependencies.downloads.pause(id), duringExit: true);
+Future<bool> cancel(String id) => run(
+  'cancel:$id',
+  () => dependencies.downloads.cancel(id),
+  duringExit: true,
+);
 ```
 
 ## 下载管理器的其他业务约束
@@ -159,7 +157,7 @@ Future<void> pause(String taskId) async {
 - 引擎：固定 9.5.9 补丁及 PluginEngine 已实现；桌面日志跨 isolate 串行写入、prefix 安全恢复、未知长度字节、确认及故障回归已独立复核，见[插件执行契约](plugin-engine.md)。周期/停止全文件扫描已用固定块有界摘要替代，并独立实测超过 4GiB 的 HTTP 落盘、暂停及内容核验；恢复仍线性认证磁盘 prefix，不能将局部通过视作整个插件子任务验收。
 - 平台：iOS 私有 resume 安全、原生材料释放/临时文件保护失败及真机生命周期，Windows 实机、最低版本、默认目录/持久授权/系统打开仍待验证；Android/桌面不得自动恢复，iOS 不重复提交。
 - 存储：AppStore v2 与确认行已落库；执行侧独立日志不写业务表。用户目录发布恢复及 completed 源释放已接入，必须核对实际业务提交；不假定 URI/文件身份稳定，能力限制及删除功能缺口见[文件契约](file-storage.md)。
-- 依赖与发布：sqlite3 3.5.2、path_provider 2.1.6、固定 9.5.9 path 插件已锁定；原生目录选择已接线，Repository 已实现；Riverpod/Provider/UI 仍待实现。macOS host12、iOS前轮host15只证明相应主机边界，仓库最低10.15/14及Windows未验收。
+- 依赖与发布：sqlite3 3.5.2、path_provider 2.1.6、固定9.5.9 path插件、flutter_riverpod 3.4.3 已解析；Repository/Provider/UI 已接入。初始化显式重试、资源首异常保留及 macOS requestExit 严格布尔协议见[UI 契约](ui.md)。Windows退出未接线，macOS红钮/Quit未实际操作；host12/iOS前轮host15不证明最低10.15/14，完整平台未验收。
 
 ## Android 执行协议、Service 与私有暂存（主机局部通过）
 

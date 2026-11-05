@@ -1,4 +1,4 @@
-{"file": ".trellis/spec/frontend/index.md", "reason": "开发前约定、检查入口和当前未实现状态"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "规范入口、UI局部PASS与完整平台BLOCK状态"}
 {"file": ".trellis/spec/frontend/architecture.md", "reason": "分层、执行身份、回执确认、进度和文件恢复规范"}
 {"file": ".agents/specs/download-manager/requirements.md", "reason": "已确认平台范围及49项功能验收"}
 {"file": ".agents/specs/download-manager/design.md", "reason": "修订后的具体签名、数据模型、安全协议和平台验证门槛"}
@@ -6,3 +6,5 @@
 {"file": ".trellis/spec/frontend/repositories.md", "reason": "真实仓库 API、取消优先与启动零自动传输"}
 {"file": ".trellis/spec/frontend/file-storage.md", "reason": "目录选择、发布恢复、源释放及明确平台缺口"}
 {"file": ".trellis/spec/frontend/persistence.md", "reason": "AppStore v2 组装及业务事务边界"}
+{"file": ".trellis/spec/frontend/ui.md", "reason": "检查七节契约、实际签名、UI数据唯一来源与局部证据限制"}
+{"file": ".trellis/spec/frontend/plugin-engine.md", "reason": "检查owner不误清、初始化失败重试、首异常及幂等close"}

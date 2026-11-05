@@ -4,7 +4,9 @@
 
 适用于本仓库 Flutter 应用及各平台适配：Android、macOS、Windows 为必需平台，iOS 为希望一并提供、需验证可行性的平台。采用按功能组织目录、MVVM 职责划分、Repository/Service 分层，Riverpod 负责状态管理与依赖注入。复杂业务按需提取 UseCase。
 
-领域/执行 DTO、DownloadEngine、FileStorage 与 AppStore v2 与三个 Repository 已实现；PluginEngine、AndroidEngine 及文件发布/完成源显式 ack 释放已有局部独立证据。当前 Plugin commands.sqlite v2、Android execution v8；普通/旧 ack 不删完整源。最新57 focused（55桥＋2锁）、macOS5引擎＋9文件真实集成、93 JVM 独立 --rerun-tasks 和 flutter analyze 通过。22项 Android instrumentation 本轮仅编译，旧 API37 v7 的20 SQLite＋7 Runtime 为历史通过，不证明 v8。完整 FileStorage PRD 仍 BLOCK/in_progress，Apple/SAF 现存目标删除与用户目录临时副本回收仍是功能缺口；Windows 缺环境，macOS host12/iOS前轮host15不证明最低10.15/14。用户负责 Android 实机，不阻塞其他功能。Repository 最新独立验证 141 项（36 仓库＋105 既有）、analyze clean、1 项真实 macOS smoke（总 GET=2，重开零新增）；Riverpod、Provider 与业务 UI 尚未实现，`lib/main.dart` 仍为计数器。具体执行与平台边界见以下规范。
+领域/执行 DTO、DownloadEngine、FileStorage、AppStore 四表 v2 与三个 Repository 已实现；Plugin commands.sqlite v2、Android execution v8，普通/旧 ack 不删完整源。前序文件阶段57 focused、macOS5引擎＋9文件集成、93 JVM通过；22项 Android v8 instrumentation仅编译，旧 API37 v7 设备结果不证明 v8。Repository 阶段141项及1项真实macOS smoke为历史局部证据。
+
+Riverpod 3.4.3、Provider、中文业务 UI 和 AppDependencies 已接入，见[UI 契约](ui.md)。UI 独立最终 analyze exit0、155 Flutter用例、2项真实macOS Plugin集成、1项真实UI smoke通过；后者 GET=1、557056字节 paused，SQLite与回执一致。host12仅临时目标，不证明macOS10.15。完整 UI/FileStorage 仍 BLOCK/in_progress，PRD不勾选；速度/ETA未知、restartUnsupported、响应命名/最终URL、Apple/SAF删除及临时副本、Windows退出、macOS红钮/Quit实际操作、iOS/Windows/最低版本仍未验收。系统截图黑屏不算通过；Android设备由用户负责。
 
 ## 规范入口
 
@@ -15,6 +17,7 @@
 | [插件执行与恢复契约](plugin-engine.md) | 已实现适配器、独立执行日志、业务确认、prefix 恢复与尚未验收的平台边界 |
 | [文件发布与源释放契约](file-storage.md) | 真实工厂/默认目录、唯一发布日志、取消重放、completed 同事务显式 ack、异步 SQLite 门及平台缺口 |
 | [仓库与恢复协调契约](repositories.md) | 三仓库真实签名、分队列、取消优先、提交后通知、完整 ack 重放与只读启动 |
+| [界面与应用组装契约](ui.md) | 具体依赖 record、三仓库流、局部操作状态、取消优先、初始化重试与退出证据边界 |
 
 需求来源：[下载管理器需求](../../../.agents/specs/download-manager/requirements.md)；跨平台方案见 [设计文档](../../../.agents/specs/download-manager/design.md)。功能范围以需求为准；本目录约束如何实现，不扩展需求范围。
 

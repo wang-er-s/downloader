@@ -14,6 +14,78 @@ import 'package:sqlite3/sqlite3.dart';
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
+  testWidgets('failed open releases ownership and retry preserves active owner', (
+    tester,
+  ) async {
+    final root = Directory.systemTemp.createTempSync('plugin-open-retry-');
+    final store = AppStore(sqlite3.openInMemory());
+    final journal = Directory('${root.path}/execution');
+    final initial = await PluginEngine.open(
+      store: store,
+      journalDirectory: journal,
+    );
+    await initial.close();
+    await initial.close();
+    final commands = sqlite3.open('${journal.path}/commands.sqlite');
+    commands.execute(
+      "INSERT INTO executions(id,input,plugin_task) VALUES ('broken','{}','invalid-json')",
+    );
+    try {
+      await expectLater(
+        PluginEngine.open(store: store, journalDirectory: journal),
+        throwsA(isA<FormatException>()),
+      );
+      expect(
+        DesktopDownloader().groupStatusCallbacks['downloader.execution.v1'],
+        isNull,
+      );
+      expect(
+        DesktopDownloader().groupProgressCallbacks['downloader.execution.v1'],
+        isNull,
+      );
+      commands.execute("DELETE FROM executions WHERE id='broken'");
+      final retry = await PluginEngine.open(
+        store: store,
+        journalDirectory: journal,
+      );
+      final statusCallback =
+          DesktopDownloader().groupStatusCallbacks['downloader.execution.v1'];
+      final progressCallback =
+          DesktopDownloader().groupProgressCallbacks['downloader.execution.v1'];
+      expect(statusCallback, isNotNull);
+      expect(progressCallback, isNotNull);
+      try {
+        await expectLater(
+          PluginEngine.open(
+            store: store,
+            journalDirectory: Directory('${root.path}/other'),
+          ),
+          throwsA(isA<PluginEngineException>()),
+        );
+        expect(
+          DesktopDownloader().groupStatusCallbacks['downloader.execution.v1'],
+          same(statusCallback),
+        );
+        expect(
+          DesktopDownloader().groupProgressCallbacks['downloader.execution.v1'],
+          same(progressCallback),
+        );
+        expect((await retry.inspect()).receipts, isEmpty);
+      } finally {
+        await retry.close();
+      }
+      final reopened = await PluginEngine.open(
+        store: store,
+        journalDirectory: journal,
+      );
+      await reopened.close();
+    } finally {
+      commands.close();
+      store.close();
+      root.deleteSync(recursive: true);
+    }
+  });
+
   testWidgets(
     'real desktop engine, SQLite commit faults, replay and explicit acknowledgement',
     (tester) async {

@@ -4,12 +4,12 @@
 
 按用户继续完善其他功能的授权，在 Repository 局部独立检查与检查点 b8b2082 后激活；前序任务仍保留未验收缺口，不能据此宣称完整安全原型或平台通过。先逐张读取 docs/ 七张参考图，加载 Flutter/UI 规范和设计技能；已有资料决定布局。
 
-- [ ] 读取 lib/main.dart、Widget 测试及实际仓库接口，确认所有入口和导出。
-- [ ] 组装 app、Riverpod 和主题，替换计数器页面及相应旧 smoke test。
-- [ ] 实现下载分类/列表、进度、空态和任务操作及确认反馈。
-- [ ] 实现新建下载、缓存新增/编辑/发起和设置/目录选择，沿用共享校验。
-- [ ] 接入真实错误/处理中与恢复提示；处理宽窄窗口、大字体、键盘、语义及桌面退出。
-- [ ] Widget 测试后进行真实跨平台 smoke 和视觉/交互检查。
+- [x] 已核对lib/main.dart、Widget测试及真实仓库接口。
+- [x] 已组装app、Riverpod与主题并替换旧首页及测试。
+- [x] 已实现下载分类/列表、进度、空态和任务操作及确认反馈。
+- [x] 已实现下载/缓存表单及设置/目录选择，沿用共享校验。
+- [x] 已接入错误、局部busy、恢复提示及宽窄窗口/大字体/键盘/语义；桌面退出仅macOS接线及Dart回归。
+- [ ] 跨平台smoke、系统退出实际交互和完整视觉/无障碍验收仍缺；本机创建/暂停局部通过。
 
 ## 检查
 
@@ -26,3 +26,23 @@ fake 数据仅用于隔离 Widget 测试，不冒充可运行业务。依赖或�
 以三个真实 Repository、AppStore v2、已有 Engine/FileStorage 为应用级依赖，接入 Riverpod 和中文界面；不改底层契约以适配 UI。允许实际解析兼容的 flutter_riverpod，桌面退出优先复用 Flutter/原生已有机制，必要平台接线先记录方案。页面退订不关闭引擎，应用初始化失败给出错误与显式重试。
 从零重下 restartUnsupported、Apple/SAF 删除及临时副本回收等缺口必须如实反馈，不伪造成功或取消后新建模拟。目录选择取消保留原值，当前设置仓库不校验授权，调用方使用已有平台选择能力。Android 设备由用户测试，本轮不跑模拟器/设备；Windows/iOS/最低版本无环境不计通过。
 本轮要求真实可运行入口、Widget/Provider 自动化与本机 macOS 真实 Repository 流 smoke；实施后独立检查、规范同步及授权提交。PRD 未满足项不勾选，不归档。
+
+本轮执行：先最小依赖与真实错误/重试入口，再三分类/操作/配置设置，然后 Widget/Provider、顺序 analyze/test，最后 macOS 真实 UI smoke 与截图。共享 guides/index.md 当前不存在，按已读 frontend 规范实施。所有未知能力保留明确错误，PRD 不勾选。
+
+## 本轮实现与验证结果
+已接入真实应用依赖、三个仓库 StreamProvider、只存操作状态的 Notifier、中文下载/设置、三类数量、下载/缓存表单、任务菜单、未知进度、错误与发布恢复入口。macOS AppDelegate 最小扩展获主管授权，代理转发原窗口委托；close/Quit 合流到 Dart 确认、退出锁、真实暂停保存与最终活动项重查。
+实施阶段历史结果为analyze exit0、153 Flutter用例及1项真实UI smoke（GET=1/524288字节paused）。它们由下文独立最终155项与557056字节结果更新；保留历史日志，不重复累计为独立新增证据。
+实际运行 RenderRepaintBoundary 帧 /tmp/download-ui-impl-actual-render.png 已读图检查：深色桌面三分类与真实 paused 卡片无覆盖。系统 screencapture /tmp/download-ui-impl-real-macos.png 全黑且 open foreground 返回1，不算系统窗口截图通过。macOS 原生 close/Quit 已编译但无系统菜单/红钮实际操作证据；Dart 通道回归覆盖 pending 拒绝、取消、暂停失败拒绝、真实回执成功后放行与创建锁。Windows 无原生退出接线证据；Android用户负责，iOS/Windows/最低版本未验证。
+保留限制：Repository 无单调样本公开给 UI，速度/ETA显示未知；从零重启、响应命名/最终URL、Apple/SAF安全删除等底层缺口未改。屏幕阅读器真人操作、七图全部实机截图、全平台正常退出仍需后续验收。未stage/commit/归档，PRD保持未勾选。
+
+独立检查修复：feature Provider以具体Repository/FileStorage命名record注入，移除app反向import；取消使用独立busy键并保留菜单入口；Notifier异步返回先检查ref.mounted，成功不清除其他并发失败。应用初始化清理保留首异常并尽力释放每个资源。主管明确授权PluginEngine.open失败清理与close幂等、固定callback group单活实例所有权，增加真实损坏日志初始化失败→修复数据→retry及第二实例拒绝不误清首实例回归；未改传输/发布/ack/schema。原生退出回复增加CFBoolean严格核验，Dart确认后检查mounted、放行前重验剩余busy和活动任务。
+独立最终顺序 /tmp/download-ui-check-final-analyze.log exit0、final-test.log exit0共155项（原153＋2取消/销毁回归）；plugin.log exit0共2真实macOS集成项（含新增初始化失败/重试）；final-smoke.log exit0共1真实UI集成项，GET=1、557056字节paused且SQLite回执一致。host12仅临时xcconfig，未改最低目标。联合两集成文件首次运行第二个host启动失败exit1，拆分独立运行均通过；新增Widget初稿pumpAndSettle受不确定动画影响，改为有限帧和菜单可用性断言后通过。
+已逐张读取七张docs参考图及实施旧渲染、本轮实际RenderRepaintBoundary渲染，桌面深色布局可读；不冒充系统窗口/close/Quit实际交互或其他平台验收。任务仍BLOCK，PRD不勾选，不stage/commit/archive。
+
+## 本轮规范同步（仅文档）
+
+- [x] 加载trellis-update-spec、独立检查报告、当前任务及正式相关规范，核对实际源码签名与锁定版本。
+- [x] 新增七节[UI规范](../../spec/frontend/ui.md)，同步架构、插件、仓库、文件、源设计及上下文清单；持久化规范已准确为四表v2，无必要改动，源设计SQL保持原样。
+- [x] 保留独立局部PASS与整体BLOCK/in_progress边界，PRD未勾选；复用`/tmp/download-ui-check-final-{analyze,test,plugin,smoke}.exit`全0，不重跑产品测试。
+
+本轮文档校验及受保护文件哈希比对结果随外部交付报告提供；未修改产品代码/配置/依赖、PRD、task.json、requirements、review、.pi、docs或其他任务，未stage/commit/push/archive。
