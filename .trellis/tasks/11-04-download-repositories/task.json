@@ -3,7 +3,7 @@
   "name": "download-repositories",
   "title": "下载仓库与恢复协调",
   "description": "实现统一任务流、命令协调、回执业务事务确认、平台恢复语义及缓存与设置仓库。",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": null,
   "package": null,
