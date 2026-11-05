@@ -55,3 +55,8 @@ fake 数据仅用于隔离 Widget 测试，不冒充可运行业务。依赖或�
 - [ ] macOS 12 实机、release、系统 close/Quit 和其他平台验收仍未完成；PRD/task.json 不变，不 stage/commit/push/archive。
 
 独立部署核查：项目级 Debug/Profile/Release 均为 12.0；Runner、RunnerTests 与 Flutter Assemble 无目标级部署覆盖，xcconfig 链无额外部署值。清除 XCODE_XCCONFIG_FILE/MACOSX_DEPLOYMENT_TARGET 后，分别只读执行三配置 Runner 的 xcodebuild -showBuildSettings，均 exit0 且有效值 12.0。复核既有默认 debug 构建日志与 .exit=0；实际 downloader.app 的 LSMinimumSystemVersion=12.0、主 Mach-O LC_BUILD_VERSION minos=12.0。五文件差异仅调整当前基线并补充证据，历史 host12/10.15 未验证结论保留；无阻断缺陷。不重跑构建或 Dart 测试，Profile/Release 仅核查配置，不计构建/运行通过。
+
+## 应用图标替换（2026-11-05）
+
+用户批准生成并替换图标，主会话直接处理。原图保存在 assets/branding/downloader-icon.png；替换 Android 五档 mipmap、iOS AppIcon 15张、macOS AppIcon 7张及 Windows 多尺寸 ICO，共28个现有资源文件，沿用 Manifest/Contents.json/Runner.rc 引用，无新增依赖或业务代码。iOS 转为不透明 RGB 并补满蓝色底，其他平台保留透明背景，原始图片不改。
+Pillow 断言核验全部目录尺寸、iOS 无 alpha、Android 密度与 Windows ICO 的16/24/32/48/64/128/256尺寸通过。清除临时部署环境覆盖后 flutter build macos --debug exit0，产物 downloader.app，日志 /tmp/downloader-icon-build.log。本轮仅资源替换，不重复 Dart 测试；Android/iOS/Windows 构建及各系统桌面图标缓存表现未实机验证。
