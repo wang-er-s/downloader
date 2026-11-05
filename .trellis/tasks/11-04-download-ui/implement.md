@@ -2,7 +2,7 @@
 
 ## 依赖与准备
 
-repositories 已验收且安全原型通过后激活。先逐张读取 docs/ 七张参考图，加载适用的 Flutter/UI 规范和 UI 设计技能；已有资料决定布局，不用新风格扩展范围。
+按用户继续完善其他功能的授权，在 Repository 局部独立检查与检查点 b8b2082 后激活；前序任务仍保留未验收缺口，不能据此宣称完整安全原型或平台通过。先逐张读取 docs/ 七张参考图，加载 Flutter/UI 规范和设计技能；已有资料决定布局。
 
 - [ ] 读取 lib/main.dart、Widget 测试及实际仓库接口，确认所有入口和导出。
 - [ ] 组装 app、Riverpod 和主题，替换计数器页面及相应旧 smoke test。
@@ -20,3 +20,9 @@ flutter analyze、flutter test。Widget 覆盖真实状态订阅、分类数量�
 ## 停点与回滚
 
 fake 数据仅用于隔离 Widget 测试，不冒充可运行业务。依赖或平台安全问题不能由 UI 藏错/伪造状态；仅回退本任务的界面变更，不清除存储和文件。
+
+## 激活与本轮生产边界（2026-11-05）
+
+以三个真实 Repository、AppStore v2、已有 Engine/FileStorage 为应用级依赖，接入 Riverpod 和中文界面；不改底层契约以适配 UI。允许实际解析兼容的 flutter_riverpod，桌面退出优先复用 Flutter/原生已有机制，必要平台接线先记录方案。页面退订不关闭引擎，应用初始化失败给出错误与显式重试。
+从零重下 restartUnsupported、Apple/SAF 删除及临时副本回收等缺口必须如实反馈，不伪造成功或取消后新建模拟。目录选择取消保留原值，当前设置仓库不校验授权，调用方使用已有平台选择能力。Android 设备由用户测试，本轮不跑模拟器/设备；Windows/iOS/最低版本无环境不计通过。
+本轮要求真实可运行入口、Widget/Provider 自动化与本机 macOS 真实 Repository 流 smoke；实施后独立检查、规范同步及授权提交。PRD 未满足项不勾选，不归档。

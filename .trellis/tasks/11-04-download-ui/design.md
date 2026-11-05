@@ -2,7 +2,7 @@
 
 ## 前置与范围
 
-依赖 repositories 的稳定业务 API，且前四项安全原型无未解决阻断。按[源设计](../../../.agents/specs/download-manager/design.md)和[截图评审](../../../.agents/specs/download-manager/review.md)呈现已确认交互，不重新做产品风格选择。
+依赖 Repository 检查点 b8b2082 的稳定业务 API，按用户授权继续 UI；前序完整 PRD 和平台验收仍未完成。从零重下、Apple/SAF 删除等缺口保留并真实反馈，不能通过 UI 模拟。按[源设计](../../../.agents/specs/download-manager/design.md)和[截图评审](../../../.agents/specs/download-manager/review.md)呈现已确认交互，不重新做产品风格选择。
 
 ## 结构
 

@@ -3,7 +3,7 @@
   "name": "download-ui",
   "title": "下载管理器Flutter界面",
   "description": "依据截图实现下载中/完成/缓存、任务操作、配置与设置，适配移动和桌面可访问交互。",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": null,
   "package": null,
