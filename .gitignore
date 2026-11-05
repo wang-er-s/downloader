@@ -32,6 +32,7 @@ migrate_working_dir/
 .pub/
 /build/
 /coverage/
+/.flutter_packager.json
 
 # Symbolication related
 app.*.symbols
