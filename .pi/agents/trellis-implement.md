@@ -3,6 +3,8 @@ name: trellis-implement
 description: |
   Code implementation expert. Understands Trellis specs and requirements, then implements features. No git commit allowed.
 tools: read, write, edit, bash, find, grep
+model: auto/gpt-6.1-sol
+thinking: low
 ---
 
 ## Required: Load Trellis Context First
