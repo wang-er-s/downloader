@@ -139,6 +139,56 @@ void main() {
     await engine.eventsController.close();
   });
 
+  testWidgets('category switches keep chip bounds and add position stable', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPhysicalSize);
+    for (final width in [320.0, 375.0, 430.0, 1024.0]) {
+      tester.view.physicalSize = Size(width, 900);
+      await mount(tester, deps);
+      final chips = find.byType(ChoiceChip);
+      final bounds = [for (var i = 0; i < 3; i++) tester.getRect(chips.at(i))];
+      final addPosition = tester.getTopLeft(find.byIcon(Icons.add));
+      final appBar = tester.getRect(find.byType(AppBar));
+      expect(appBar.contains(tester.getCenter(find.byIcon(Icons.add))), isTrue);
+      for (final index in [1, 2, 0, 2, 1, 0]) {
+        await tester.tap(chips.at(index));
+        for (var frame = 0; frame < 20; frame++) {
+          await tester.pump(const Duration(milliseconds: 16));
+          for (var i = 0; i < 3; i++) {
+            expect(
+              tester.getRect(chips.at(i)),
+              bounds[i],
+              reason: 'width=$width, category=$index, frame=$frame',
+            );
+          }
+          expect(tester.getTopLeft(find.byIcon(Icons.add)), addPosition);
+          expect(tester.takeException(), isNull);
+        }
+        expect(tester.widget<ChoiceChip>(chips.at(index)).selected, isTrue);
+        expect(find.byTooltip(index == 2 ? '新增缓存' : '新建下载'), findsOneWidget);
+      }
+    }
+  });
+
+  testWidgets('settings hides the title bar add action', (tester) async {
+    await mount(tester, deps);
+    expect(find.byTooltip('新建下载'), findsOneWidget);
+    await tester.tap(find.text('设置').last);
+    await tester.pumpAndSettle();
+    expect(find.byIcon(Icons.add), findsNothing);
+    await tester.tap(
+      find.descendant(
+        of: find.byType(NavigationRail),
+        matching: find.text('下载'),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('新建下载'), findsOneWidget);
+  });
+
   test(
     'cancel bypasses task busy and disposed operations settle safely',
     () async {
@@ -288,6 +338,27 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('重试'), findsOneWidget);
     expect(find.textContaining('暂无'), findsNothing);
+  });
+
+  testWidgets('title bar add icon has contrast in both themes', (tester) async {
+    addTearDown(tester.platformDispatcher.clearPlatformBrightnessTestValue);
+    for (final brightness in Brightness.values) {
+      tester.platformDispatcher.platformBrightnessTestValue = brightness;
+      await mount(tester, deps);
+      await tester.pumpAndSettle();
+      final icon = find.byIcon(Icons.add);
+      final foreground = IconTheme.of(tester.element(icon)).color!;
+      final background = tester
+          .element(icon)
+          .findAncestorWidgetOfExactType<Material>()!
+          .color!;
+      final luminances = [
+        foreground.computeLuminance(),
+        background.computeLuminance(),
+      ]..sort();
+      final contrast = (luminances.last + 0.05) / (luminances.first + 0.05);
+      expect(contrast, greaterThanOrEqualTo(4.5), reason: '$brightness');
+    }
   });
 
   testWidgets(

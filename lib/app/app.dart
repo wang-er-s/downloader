@@ -6,6 +6,7 @@ import 'dependencies.dart';
 import '../features/downloads/domain/download_models.dart';
 import '../features/downloads/presentation/providers.dart';
 import '../features/downloads/presentation/downloads_page.dart';
+import '../features/downloads/presentation/download_form.dart';
 import '../features/settings/domain/app_settings.dart';
 import '../features/settings/presentation/settings_page.dart';
 
@@ -38,6 +39,7 @@ class _DownloaderAppState extends State<DownloaderApp> {
         );
       }
       return MaterialApp(
+        title: '下载器',
         debugShowCheckedModeBanner: false,
         theme: appTheme(Brightness.light),
         home: Scaffold(
@@ -79,7 +81,7 @@ class DownloadApplication extends ConsumerWidget {
     final theme =
         ref.watch(settingsProvider).asData?.value.theme ?? AppTheme.system;
     return MaterialApp(
-      title: '下载管理器',
+      title: '下载器',
       debugShowCheckedModeBanner: false,
       theme: appTheme(Brightness.light),
       darkTheme: appTheme(Brightness.dark),
@@ -101,6 +103,7 @@ class AppShell extends ConsumerStatefulWidget {
 
 class _AppShellState extends ConsumerState<AppShell> {
   int page = 0;
+  int category = 0;
   bool exiting = false;
   bool exitApproved = false;
   late final AppLifecycleListener lifecycle;
@@ -230,7 +233,13 @@ class _AppShellState extends ConsumerState<AppShell> {
             ],
           ),
         Expanded(
-          child: page == 0 ? const DownloadsPage() : const SettingsPage(),
+          child: page == 0
+              ? DownloadsPage(
+                  category: category,
+                  onCategoryChanged: (value) =>
+                      setState(() => category = value),
+                )
+              : const SettingsPage(),
         ),
       ],
     );
@@ -238,7 +247,27 @@ class _AppShellState extends ConsumerState<AppShell> {
       builder: (context, constraints) {
         final wide = constraints.maxWidth >= 800;
         return Scaffold(
-          appBar: AppBar(title: Text(page == 0 ? '下载' : '设置')),
+          appBar: AppBar(
+            backgroundColor: Theme.of(context).colorScheme.surfaceContainer,
+            scrolledUnderElevation: 0,
+            title: Text(page == 0 ? '下载' : '设置'),
+            actions: [
+              if (page == 0)
+                Padding(
+                  padding: const EdgeInsets.only(right: 16),
+                  child: IconButton.filled(
+                    style: IconButton.styleFrom(
+                      backgroundColor: Theme.of(context).colorScheme.primary,
+                      foregroundColor: Theme.of(context).colorScheme.onPrimary,
+                    ),
+                    tooltip: category == 2 ? '新增缓存' : '新建下载',
+                    onPressed: () =>
+                        showDownloadForm(context, saved: category == 2),
+                    icon: const Icon(Icons.add),
+                  ),
+                ),
+            ],
+          ),
           body: SafeArea(
             child: wide
                 ? Row(

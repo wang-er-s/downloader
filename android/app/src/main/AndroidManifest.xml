@@ -6,7 +6,7 @@
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <application
         android:usesCleartextTraffic="true"
-        android:label="downloader"
+        android:label="下载器"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <service android:name=".downloader.DownloadService" android:exported="false" android:foregroundServiceType="dataSync" />

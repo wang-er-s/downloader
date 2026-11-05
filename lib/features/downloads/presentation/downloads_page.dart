@@ -29,16 +29,18 @@ String statusLabel(DownloadStatus status) => switch (status) {
   DownloadStatus.deleting => '文件删除待处理',
 };
 
-class DownloadsPage extends ConsumerStatefulWidget {
-  const DownloadsPage({super.key});
-  @override
-  ConsumerState<DownloadsPage> createState() => _DownloadsPageState();
-}
+class DownloadsPage extends ConsumerWidget {
+  const DownloadsPage({
+    super.key,
+    required this.category,
+    required this.onCategoryChanged,
+  });
 
-class _DownloadsPageState extends ConsumerState<DownloadsPage> {
-  int category = 0;
+  final int category;
+  final ValueChanged<int> onCategoryChanged;
+
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final tasks = ref.watch(tasksProvider);
     final saved = ref.watch(savedProvider);
     final list = tasks.asData?.value;
@@ -64,16 +66,11 @@ class _DownloadsPageState extends ConsumerState<DownloadsPage> {
             children: [
               for (var i = 0; i < labels.length; i++)
                 ChoiceChip(
+                  showCheckmark: false,
                   label: Text(labels[i]),
                   selected: category == i,
-                  onSelected: (_) => setState(() => category = i),
+                  onSelected: (_) => onCategoryChanged(i),
                 ),
-              IconButton.filled(
-                tooltip: category == 2 ? '新增缓存' : '新建下载',
-                onPressed: () =>
-                    showDownloadForm(context, saved: category == 2),
-                icon: const Icon(Icons.add),
-              ),
             ],
           ),
         ),
