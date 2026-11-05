@@ -303,6 +303,26 @@ final class AndroidEngine implements DownloadEngine {
         }
       }
     }
+    if (ack.releaseResumeRefs.isNotEmpty) {
+      final task = _committedBusiness(ack);
+      final receipt = task?.engineReceipt;
+      if (task == null ||
+          task.key != ack.key ||
+          task.status != DownloadStatus.completed ||
+          receipt == null ||
+          receipt.state != DownloadStatus.completed ||
+          receipt.receiptVersion != ack.receiptVersion ||
+          receipt.publishedLocation == null ||
+          receipt.publishOperation?.phase != PublishPhase.published ||
+          ack.releaseResumeRefs.length != 1 ||
+          ack.releaseResumeRefs.single != receipt.resumeRef ||
+          jsonEncode(task.fileLocation?.toJson()) !=
+              jsonEncode(receipt.publishedLocation?.toJson()) ||
+          jsonEncode(task.publishOperation?.toJson()) !=
+              jsonEncode(receipt.publishOperation?.toJson())) {
+        _conflict('uncommittedReceipt');
+      }
+    }
     if (_closed) _conflict('closed');
     // Never remove business acknowledgement rows or perform local material IO.
     await _methods.invokeMethod<void>('acknowledge', {

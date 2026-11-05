@@ -43,10 +43,21 @@ class ExecutionJournalTest : Instrumentation() {
                     listOf(runtime::lifecycle)
                 }
 
-                "revokedBeforePauseCallback" -> listOf(runtime::revokedBeforePauseCallback)
-                "revokedBeforeCancelCallback" -> listOf(runtime::revokedBeforeCancelCallback)
-                "permissionChangedBeforeCallback" -> listOf(runtime::permissionChangedBeforeCallback)
-                "deniedPromotion" -> listOf(runtime::deniedPromotion)
+                "revokedBeforePauseCallback" -> {
+                    listOf(runtime::revokedBeforePauseCallback)
+                }
+
+                "revokedBeforeCancelCallback" -> {
+                    listOf(runtime::revokedBeforeCancelCallback)
+                }
+
+                "permissionChangedBeforeCallback" -> {
+                    listOf(runtime::permissionChangedBeforeCallback)
+                }
+
+                "deniedPromotion" -> {
+                    listOf(runtime::deniedPromotion)
+                }
 
                 "denied" -> {
                     listOf(runtime::denied)
@@ -82,6 +93,8 @@ class ExecutionJournalTest : Instrumentation() {
                         ::testPublicPersistedCancelBlocksProofAndLateStaging,
                         ::testCancelCleanupReopenOwnershipAndRollback,
                         ::testV6CleanupMigrationRollback,
+                        ::testCompletedSourceAckReplay,
+                        ::testV7ReleaseMigrationPreservesHistory,
                     )
                 }
 
@@ -156,6 +169,82 @@ class ExecutionJournalTest : Instrumentation() {
             }
         // Standard instrumentation completion; per-test statuses determine test success.
         finish(Activity.RESULT_OK, output)
+    }
+
+    fun testCompletedSourceAckReplay() {
+        val c = command()
+        journal.register(c, "s")
+        journal.acceptWorker(c, "s")
+        val directory = java.io.File(targetContext.filesDir.canonicalFile, "http_staging_v1").apply { mkdirs() }
+        val id = UUID.randomUUID().toString()
+        val part = java.io.File(directory, "$id.part")
+        val facts = java.io.File(directory, "$id.facts")
+        journal.registerMaterials(c, "s", part, facts)
+        part.writeText("complete")
+        facts.writeText("facts")
+        val publishing = journal.finishWorker(c, "s", NativeCheckpoint("publishing", 8, 8, stagingLocation = part.path), null)
+        journal.acknowledge(NativeAck(c.key, publishing["receiptVersion"] as Long, emptyList()))
+        assertTrue(part.exists())
+        val operation = mapOf<String, Any?>("key" to c.key.json(), "phase" to "prepared", "sourceRef" to part.path, "sourceLength" to 8L)
+        val file = mapOf<String, Any?>("locator" to "content://media/external/downloads/123", "identity" to "owned")
+        journal.publicationReceipt(operation, file)
+        val receipt = journal.inspect().last()
+        val ack = NativeAck(c.key, receipt["receiptVersion"] as Long, listOf(receipt["resumeRef"] as String))
+        rejects("materialOwnership") { journal.acknowledge(ack.copy(releaseResumeRefs = listOf(part.path))) }
+        assertTrue(part.exists() && facts.exists())
+        journal.writableDatabase.execSQL(
+            "CREATE TRIGGER fail_release BEFORE UPDATE OF done ON completed_sources BEGIN SELECT RAISE(ABORT,'injected'); END",
+        )
+        try {
+            journal.acknowledge(ack)
+            fail("done save must fail")
+        } catch (
+            error: EngineProtocolException,
+        ) {
+            assertEquals("cleanupFailure", error.code)
+        }
+        assertTrue(!part.exists() && facts.exists())
+        journal.writableDatabase.rawQuery("SELECT ack FROM executions", null).use {
+            it.moveToFirst()
+            assertEquals(publishing["receiptVersion"], it.getLong(0))
+        }
+        journal.writableDatabase.execSQL("DROP TRIGGER fail_release")
+        journal.close()
+        journal = ExecutionJournal(targetContext, name)
+        journal.acknowledge(ack)
+        journal.acknowledge(ack)
+        assertTrue(!part.exists() && !facts.exists())
+    }
+
+    fun testV7ReleaseMigrationPreservesHistory() {
+        val c = command()
+        journal.register(c, "s")
+        val receipt = journal.complete(c, "s", NativeCheckpoint("paused", 0))
+        journal.writableDatabase.execSQL("DROP TABLE completed_sources")
+        journal.writableDatabase.version = 7
+        journal.close()
+        journal = ExecutionJournal(targetContext, name)
+        assertEquals(receipt, journal.inspect().single())
+        assertEquals(8, journal.writableDatabase.version)
+        journal.writableDatabase.version = 7 // existing table forces migration failure
+        journal.close()
+        journal = ExecutionJournal(targetContext, name)
+        try {
+            journal.inspect()
+            fail("migration must fail")
+        } catch (_: android.database.sqlite.SQLiteException) {
+        }
+        journal.close()
+        android.database.sqlite.SQLiteDatabase.openDatabase(targetContext.getDatabasePath(name).path, null, 0).use { db ->
+            assertEquals(7, db.version)
+            db.rawQuery("SELECT payload FROM receipts", null).use {
+                it.moveToFirst()
+                assertEquals(ExecutionJournal.encode(receipt), it.getString(0))
+            }
+            db.execSQL("DROP TABLE completed_sources")
+        }
+        journal = ExecutionJournal(targetContext, name)
+        assertEquals(receipt, journal.inspect().single())
     }
 
     private fun assertEquals(
@@ -352,7 +441,7 @@ class ExecutionJournalTest : Instrumentation() {
         assertNull(done["error"])
         assertEquals(accepted, journal.register(cancel, "s"))
         assertEquals(done, journal.finishCancel(cancel, "s"))
-        rejects("materialReleaseUnavailable") { journal.acknowledge(NativeAck(c.key, done["receiptVersion"] as Long, listOf("unknown"))) }
+        rejects("materialOwnership") { journal.acknowledge(NativeAck(c.key, done["receiptVersion"] as Long, listOf("unknown"))) }
         outside.delete()
     }
 
@@ -363,12 +452,14 @@ class ExecutionJournalTest : Instrumentation() {
         val db = journal.writableDatabase
         db.execSQL("DROP TABLE cancel_cleanup_members")
         db.execSQL("DROP TABLE cancel_cleanups")
+        db.execSQL("DROP TABLE completed_sources")
         db.version = 6
         journal.close()
         journal = ExecutionJournal(targetContext, name)
-        assertEquals(7, journal.writableDatabase.version)
+        assertEquals(8, journal.writableDatabase.version)
         assertEquals(receipt, journal.inspect().single())
         journal.writableDatabase.execSQL("DROP TABLE cancel_cleanups") // second DDL conflicts
+        journal.writableDatabase.execSQL("DROP TABLE completed_sources")
         journal.writableDatabase.version = 6
         journal.close()
         journal = ExecutionJournal(targetContext, name)
@@ -388,7 +479,7 @@ class ExecutionJournalTest : Instrumentation() {
         }
         journal = ExecutionJournal(targetContext, name)
         assertEquals(receipt, journal.inspect().single())
-        assertEquals(7, journal.writableDatabase.version)
+        assertEquals(8, journal.writableDatabase.version)
     }
 
     fun testCancelledWorkerCannotPromoteOrRecoverProof() {
@@ -475,10 +566,11 @@ class ExecutionJournalTest : Instrumentation() {
         dropResumeTables(journal.writableDatabase)
         journal.writableDatabase.execSQL("DROP TABLE IF EXISTS cancel_cleanup_members")
         journal.writableDatabase.execSQL("DROP TABLE IF EXISTS cancel_cleanups")
+        journal.writableDatabase.execSQL("DROP TABLE completed_sources")
         journal.writableDatabase.version = 3
         journal.close()
         journal = ExecutionJournal(targetContext, name)
-        assertEquals(7, journal.writableDatabase.version)
+        assertEquals(8, journal.writableDatabase.version)
         rejects("commandOutcomeUnknown") { journal.register(c0, "s") }
         java.net.ServerSocket(0).use { server ->
             val responder =
@@ -586,10 +678,11 @@ class ExecutionJournalTest : Instrumentation() {
         dropPublicResumeTables(journal.writableDatabase)
         journal.writableDatabase.execSQL("DROP TABLE IF EXISTS cancel_cleanup_members")
         journal.writableDatabase.execSQL("DROP TABLE IF EXISTS cancel_cleanups")
+        journal.writableDatabase.execSQL("DROP TABLE completed_sources")
         journal.writableDatabase.version = 4
         journal.close()
         journal = ExecutionJournal(targetContext, name)
-        assertEquals(7, journal.writableDatabase.version)
+        assertEquals(8, journal.writableDatabase.version)
         assertEquals(receipt, journal.inspect().single())
         assertNull(journal.inspectCandidate(c.key, "none"))
         // Version-4 failure must retain its old receipt and version; no rebuild.
@@ -597,6 +690,7 @@ class ExecutionJournalTest : Instrumentation() {
         dropPublicResumeTables(journal.writableDatabase)
         journal.writableDatabase.execSQL("DROP TABLE IF EXISTS cancel_cleanup_members")
         journal.writableDatabase.execSQL("DROP TABLE IF EXISTS cancel_cleanups")
+        journal.writableDatabase.execSQL("DROP TABLE completed_sources")
         journal.writableDatabase.version = 4 // second DDL conflicts, first new table must roll back
         journal.close()
         journal = ExecutionJournal(targetContext, name)
@@ -630,6 +724,7 @@ class ExecutionJournalTest : Instrumentation() {
         journal.writableDatabase.execSQL("CREATE TABLE recovery_attempts (sentinel TEXT)")
         journal.writableDatabase.execSQL("DROP TABLE IF EXISTS cancel_cleanup_members")
         journal.writableDatabase.execSQL("DROP TABLE IF EXISTS cancel_cleanups")
+        journal.writableDatabase.execSQL("DROP TABLE completed_sources")
         journal.writableDatabase.version = 3
         journal.close()
         journal = ExecutionJournal(targetContext, name)
@@ -653,7 +748,7 @@ class ExecutionJournalTest : Instrumentation() {
         }
         journal = ExecutionJournal(targetContext, name)
         assertEquals(receipt, journal.inspect().single())
-        assertEquals(7, journal.writableDatabase.version)
+        assertEquals(8, journal.writableDatabase.version)
     }
 
     fun testUnknownVersionPreservesHistory() {
@@ -767,11 +862,12 @@ class ExecutionJournalTest : Instrumentation() {
         journal.writableDatabase.execSQL("DROP TABLE materials")
         journal.writableDatabase.execSQL("DROP TABLE IF EXISTS cancel_cleanup_members")
         journal.writableDatabase.execSQL("DROP TABLE IF EXISTS cancel_cleanups")
+        journal.writableDatabase.execSQL("DROP TABLE completed_sources")
         journal.writableDatabase.version = 1
         journal.close()
         journal = ExecutionJournal(targetContext, name)
         assertEquals(receipt, journal.inspect().single())
-        assertEquals(7, journal.writableDatabase.version)
+        assertEquals(8, journal.writableDatabase.version)
         assertTrue(journal.inspectMaterials(c.key).isEmpty())
         assertEquals(receipt, journal.register(c, "s"))
         // Fail the SECOND DDL so rollback must undo the newly created materials table.
@@ -779,6 +875,7 @@ class ExecutionJournalTest : Instrumentation() {
         journal.writableDatabase.execSQL("DROP TABLE materials")
         journal.writableDatabase.execSQL("DROP TABLE IF EXISTS cancel_cleanup_members")
         journal.writableDatabase.execSQL("DROP TABLE IF EXISTS cancel_cleanups")
+        journal.writableDatabase.execSQL("DROP TABLE completed_sources")
         journal.writableDatabase.version = 1
         journal.close()
         journal = ExecutionJournal(targetContext, name)
@@ -1044,15 +1141,17 @@ class ExecutionJournalTest : Instrumentation() {
         dropPublicResumeTables(journal.writableDatabase)
         journal.writableDatabase.execSQL("DROP TABLE IF EXISTS cancel_cleanup_members")
         journal.writableDatabase.execSQL("DROP TABLE IF EXISTS cancel_cleanups")
+        journal.writableDatabase.execSQL("DROP TABLE completed_sources")
         journal.writableDatabase.version = 5
         journal.close()
         journal = ExecutionJournal(targetContext, name)
-        assertEquals(7, journal.writableDatabase.version)
+        assertEquals(8, journal.writableDatabase.version)
         assertEquals(receipt, journal.inspect().single())
         journal.writableDatabase.execSQL("DROP TABLE resume_sources")
         journal.writableDatabase.execSQL("DROP TABLE retired_workers")
         journal.writableDatabase.execSQL("DROP TABLE IF EXISTS cancel_cleanup_members")
         journal.writableDatabase.execSQL("DROP TABLE IF EXISTS cancel_cleanups")
+        journal.writableDatabase.execSQL("DROP TABLE completed_sources")
         journal.writableDatabase.version = 5 // second DDL active_branches conflicts
         journal.close()
         journal = ExecutionJournal(targetContext, name)
@@ -1096,10 +1195,11 @@ class ExecutionJournalTest : Instrumentation() {
         journal.writableDatabase.execSQL("DROP TABLE worker_authorizations")
         journal.writableDatabase.execSQL("DROP TABLE IF EXISTS cancel_cleanup_members")
         journal.writableDatabase.execSQL("DROP TABLE IF EXISTS cancel_cleanups")
+        journal.writableDatabase.execSQL("DROP TABLE completed_sources")
         journal.writableDatabase.version = 2
         journal.close()
         journal = ExecutionJournal(targetContext, name)
-        assertEquals(7, journal.writableDatabase.version)
+        assertEquals(8, journal.writableDatabase.version)
         rejects("commandOutcomeUnknown") { journal.register(c, "s") }
         assertTrue(journal.inspect().isEmpty())
     }
@@ -1122,7 +1222,7 @@ class ExecutionJournalTest : Instrumentation() {
         journal.acknowledge(NativeAck(c.key, 1, emptyList()))
         assertEquals(1, journal.inspect().size)
         assertEquals("new-ref", journal.inspect().single()["resumeRef"])
-        rejects("materialReleaseUnavailable") { journal.acknowledge(NativeAck(c.key, 1, listOf("new-ref"))) }
+        rejects("staleReceipt") { journal.acknowledge(NativeAck(c.key, 1, listOf("new-ref"))) }
         rejects("staleReceipt") { journal.acknowledge(NativeAck(c.key, 3, emptyList())) }
         journal.acknowledge(NativeAck(c.key, 2, emptyList()))
         journal.acknowledge(NativeAck(c.key, 1, emptyList()))

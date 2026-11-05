@@ -2,7 +2,7 @@
 
 ## 1. Scope / Trigger
 
-适用于下载领域/引擎 DTO、共享 SQLite v1，以及后续 Repository 对状态与确认的原子对齐。领域与 AppStore 已实现；PluginEngine 的独立执行日志及桌面局部验证见[插件执行契约](plugin-engine.md)，Repository 调度和用户目录发布仍未实现。源业务方案见[设计文档](../../../.agents/specs/download-manager/design.md)。
+适用于下载领域/引擎 DTO、共享 SQLite v1，以及后续 Repository 对状态与确认的原子对齐。领域与 AppStore 已实现；执行日志见[插件执行契约](plugin-engine.md)，用户目录发布与 completed 私有源显式释放已有生产实现和局部验证，见[文件契约](file-storage.md)。Repository 调度尚未实现。源业务方案见[设计文档](../../../.agents/specs/download-manager/design.md)。
 
 实现入口为 [AppStore](../../../lib/shared/data/app_store.dart)、[schema](../../../lib/shared/data/app_store_schema.dart) 和 [领域模型](../../../lib/features/downloads/domain/download_models.dart)。domain 仅依赖 Dart；Flutter、SQLite、插件类型不得泄漏进入领域。
 
@@ -48,7 +48,7 @@ void saveSettings(AppSettings settings);
 - DownloadPlatform 为 android/ios/macos/windows；FileKind 为 path/contentUri/bookmark，ResumeSupport 为 unknown/supported/unsupported。DTO 只校验形态与平台组合，不授予目录访问权或文件归属证明。
 - 字节为非负有符号 64 位整数，未知 totalBytes 为 null；不以 -1、0 或比例反推未知大小。时间落库为 UTC 毫秒，读取为 UTC DateTime。
 - `target_ref` 为 SQL NULL 或 `{version:1,targetRef:String?,fileLocation:FileLocation?}` JSON 信封。不能丢弃 FileLocation 的 platform/kind/identity，也不能把任意不透明引用猜成 JSON；非空不代表发布成功。
-- pending_command_json、publish_operation_json、engine_receipt_json 保留完整身份和版本。PublishPhase 为 prepared/creating/copying/finalizing/published；发布能力及文件操作仍由后续适配器实现。
+- pending_command_json、publish_operation_json、engine_receipt_json 保留完整身份和版本。PublishPhase 为 prepared/creating/copying/finalizing/published；发布适配器与独立日志已接入，业务表只镜像，见[文件契约](file-storage.md)。
 - AppStore 单连接、同步短事务。不得嵌套、返回 Future、在回调里 await 网络/平台调用或复制文件；事务句柄在回调结束后失效。状态与确认必须在同一事务提交，确认引擎只能发生在提交之后。
 - `commitReceipt(task,ack)` 要求 task、回执、ack 执行键及版本匹配。当前任务不存在返回 false，不导入或复活任务；当前执行键不同返回 stateConflict。旧版本不写入；相同版本完整回执及确认载荷一致才幂等，改变 downloadedBytes/resumeRef/error 等也必须拒绝。
 - `saveTask` 固定原 requestId、engineId、originalUrl、requestedFileName、目录和创建时间，禁止降低代次或回执版本。保留确认行限制其他 taskId 重用 engineId 或写回旧代次。不要以旧回调重绑当前身份。
@@ -56,6 +56,7 @@ void saveSettings(AppSettings settings);
 - 取消/删除事务先保存最后确认再删除任务；确认行不级联删除。普通暂停/失败确认的 releaseResumeRefs 为空，实际材料归属和释放由引擎再校验；存储不会删除文件或自行判断可回收材料。
 - `commitReceipt` 返回 false 时不能据此确认传入的新载荷：查询已提交确认并按该行重放。AppStore 不执行取消优先、发布恢复、启动协调等 Repository 状态机。
 - user_version=0 原子初建，version=1 验证必要表/列，未知版本拒绝且保留库。尚无已发版旧结构，不能宣称已验证历史迁移；以后逐版本迁移，绝不删库重建。回滚尽力执行，回滚失败不得掩盖最初异常。
+- completed 显式释放使用既有 resumeRef/releaseResumeRefs 承载 complete: opaque 引用，即使 resumeSupport=unsupported 也不能解释为可续传。commitReceipt 必须同事务保存业务 completed、完整回执、最终 FileLocation、published PublishOperation 与完整 ReceiptAck，再显式 acknowledge；普通/旧 ack 不删完整源。同版本完整回执及 ack 不可变，不能先存空 ack 再改释放载荷。执行侧 Plugin commands.sqlite v2/Android execution v8 的 intent、逐成员 done 和最终 ack 不属于 AppStore 四表；恢复及异步授权重核见[文件契约](file-storage.md)。
 
 ## 4. Validation & Error Matrix
 

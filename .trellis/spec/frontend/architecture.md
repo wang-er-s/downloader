@@ -4,7 +4,7 @@
 
 下载管理器页面数量有限，但下载生命周期、任务恢复和文件访问必须独立于页面。采用按功能组织目录、MVVM 式职责划分及 Repository/Service 分层；Riverpod 管理界面状态与依赖，复杂业务按需提取 UseCase。
 
-该分层决策已确认；领域/执行 DTO、DownloadEngine 与 FileStorage 接口及 AppStore v1 已实现，现有 API 与验证范围见[持久化契约](persistence.md)。PluginEngine 与固定插件补丁已接入，桌面局部验证见[插件执行契约](plugin-engine.md)；AndroidEngine 的 Dart 桥接、新下载 Service/Coordinator/HttpTransfer 生产调用链已通过主机局部独立检查；Android v6 公开 resume 生产链、冻结源与新 worker 授权、候选分支晋升及终态补存已通过主机局部独立检查；Repository 和用户文件操作仍待实现，Android 设备验收未通过。插件子任务尚未完成平台验收，当前 macOS 运行结果不能代表 iOS/Windows/最低版本通过。
+该分层决策已确认；领域/执行 DTO、DownloadEngine、FileStorage 与 AppStore v1 已实现，见[持久化契约](persistence.md)。PluginEngine 与固定补丁见[插件契约](plugin-engine.md)；Android 新下载、公开 resume、取消及 FGS 修复有局部独立证据。用户目录发布和 completed 显式源释放已有生产实现，工厂、日志版本、锁、取消与 ack 顺序集中见[文件契约](file-storage.md)。Repository/Riverpod/业务 UI 未实现，完整平台与 PRD 仍未验收，macOS 当前 host 不能代表 iOS/Windows/最低版本。
 
 平台范围为必需支持 Android、macOS、Windows，并争取同步提供 iOS。共享业务接口不能绑定 Android 专用通道或数据库；优先复用跨平台实现，仅在平台边界适配执行、目录和文件打开。iOS 系统托管后台任务例外已获用户确认：关联既有任务并同步状态，不主动重新提交失败或取消任务；用户强制退出按系统取消行为处理。具体跨平台方案见 [设计文档](../../../.agents/specs/download-manager/design.md)，其技术选型仍须通过设计审核及平台验证。
 
@@ -158,21 +158,21 @@ Future<void> pause(String taskId) async {
 
 - 引擎：固定 9.5.9 补丁及 PluginEngine 已实现；桌面日志跨 isolate 串行写入、prefix 安全恢复、未知长度字节、确认及故障回归已独立复核，见[插件执行契约](plugin-engine.md)。周期/停止全文件扫描已用固定块有界摘要替代，并独立实测超过 4GiB 的 HTTP 落盘、暂停及内容核验；恢复仍线性认证磁盘 prefix，不能将局部通过视作整个插件子任务验收。
 - 平台：iOS 私有 resume 安全、原生材料释放/临时文件保护失败及真机生命周期，Windows 实机、最低版本、默认目录/持久授权/系统打开仍待验证；Android/桌面不得自动恢复，iOS 不重复提交。
-- 存储：AppStore v1 与确认行已落库；插件独立执行日志不写业务表，确认必须核对实际业务提交。用户目录发布恢复未实现；提供方不支持安全恢复时报能力错误，不假定所有 URI/文件身份稳定。
-- 依赖与发布：sqlite3 3.5.2、path_provider 2.1.6、固定 9.5.9 path 插件已解析锁定；Riverpod 与目录选择仍待接入。macOS release/iOS 无签名构建仅在临时 host 目标 12/15 编译通过，仓库 10.15/14 仍未验证，Windows 未构建。业务功能铺开前须关闭设计所列安全门槛。
+- 存储：AppStore v1 与确认行已落库；执行侧独立日志不写业务表。用户目录发布恢复及 completed 源释放已接入，必须核对实际业务提交；不假定 URI/文件身份稳定，能力限制及删除功能缺口见[文件契约](file-storage.md)。
+- 依赖与发布：sqlite3 3.5.2、path_provider 2.1.6、固定 9.5.9 path 插件已锁定；原生目录选择已接线，Riverpod/Repository/UI 仍待实现。macOS host12、iOS前轮host15只证明相应主机边界，仓库最低10.15/14及Windows未验收。
 
 ## Android 执行协议、Service 与私有暂存（主机局部通过）
 
 ### 1. Scope / Trigger
 
-适用于 AndroidEngine、原生通道、Service/Coordinator、传输/恢复核心及 OwnedMaterialCleanup 的命令、执行和清理边界。v7 生产源码及 FGS 启动后撤权修复已独立局部 PASS：93项 JVM、flutter analyze 和 debug APK 构建通过；Dart 未改，沿用前轮独立102项。API37 模拟器 emulator-5554 已独立实跑20项 SQLite及7项 Runtime/Service用例，均零失败/错误/跳过。Runtime用例绕过 MethodChannel 编解码；完整通道、API29/30/33/35/36真机及完整PRD仍 BLOCK，不得勾选或归档。
+适用于 AndroidEngine、原生通道、Service/Coordinator、传输/恢复及 OwnedMaterialCleanup。v7 与 FGS 修复的历史局部证据包括93 JVM、analyze/debug APK，以及 API37 的20 SQLite＋7 Runtime设备用例；Runtime绕过MethodChannel。当前 execution 为 v8，新增 completed_sources 与显式完成源释放，协议见[文件契约](file-storage.md)。最新93 JVM强制重跑、57 focused与静态分析通过；22 instrumentation本轮仅编译，未设备执行，不能将旧v7结果当v8通过。完整通道/API29/30/33/35/36真机及完整PRD仍BLOCK。
 
 ### 2. Signatures
 
 - 通道固定为 `downloader/android_engine`、`downloader/android_engine/events`，请求均含 `protocolVersion=1`。`inspect` 只携带版本，返回 `{protocolVersion,ownerSessionId,sequence,receipts}`，空集合也返回当前会话。事件有当前会话、单调 sequence 和完整回执。
 - enqueue/pause/resume/cancel 携带扁平 taskId/engineId/generation、commandId、ownerSessionId、expectedReceiptVersion；enqueue 另传 `input=EngineTask.toJson()`，嵌套 key 必须匹配。ack 为扁平执行键、receiptVersion、releaseResumeRefs。不会把内部嵌套命令 JSON 原样当通道命令。
 - 日志入口：`register(command,session)`、`acceptWorker(command,session)`、`acceptResume(command,session)`、`newTransfer(command,session,allocation)`、`newResumeTransfer(command,session,allocation): ResumeTransfer`、`registerMaterials(command,session,payload,facts)`、`saveResumeCheckpoint(command,session,forced)`、`inspectResume(key)`、`newRecovery(command,session,ref): ResumeTransfer`、`inspectCandidate(key,resumeCommandId)`、`inspectRecoveries(key)`、`inspectMaterials(key)`、`workerReceipt(command,session,checkpoint,finished)`、`stopWorker(worker,command,session,checkpoint)`、`finishWorker(command,session,checkpoint,pause)`、`inspect()`、`acknowledge(ack)`；既有 `complete` 保留旧命令路径。公开 resume 经 acceptResume/newResumeTransfer；newRecovery 保留旧内部 pending 路径及其严格源版本门。
-- 独立 `android_execution_v1.db` 的 user_version=7；保留 v1–v6 历史，新增 cancel_cleanups、cancel_cleanup_members，不打开共享 AppStore。`beginCancel(command,session,worker?,checkpoint?)` 原子登记意图；`finishCancel(command,session)` 仅在停止及终态保存后清理并提交结果。
+- 独立 `android_execution_v1.db` 的 user_version=8；保留 v1–v7 历史，cancel_cleanups/cancel_cleanup_members 之外新增 completed_sources。`beginCancel(command,session,worker?,checkpoint?)` 原子登记意图；`finishCancel(command,session)` 仅在停止及终态保存后清理并提交结果。发布另用 android_publications_v1.db v1，详见[文件契约](file-storage.md)。
 - ServiceLifecycle：`issue(stop)`、`pending(token,action)`、`deliver(token,instance,promote,authorize)`、`foreground(token,instance,action)`、`acceptsFailure(token,instance)`、`ready(token,instance)`、`worker(token,action)`、`revoke(token)`、`idle()`、`stop(ticket,action)`、`destroy(instance,action)`；token 和实例归属只在当前进程有效，不从数据库重建调度。
 - `HttpTransfer(appFiles: File, authorizedUrl: String? = null, onCheckpoint: (ForcedMaterial) -> Unit = {}, onAllocation: (ExecutionKey,File,File) -> Unit).run(key,url,stop,onSample): Staged`；Sample 为 bytes:Long、total:Long?、monotonicMs:Long，Staged 为 file、bytes、total、effectiveUrl、stop、sha256。`Stop.request(PAUSE|CANCEL)` 只发布停止请求。生产 newTransfer 注入检查点持久回调；`ResumeTransfer.run(stop,onSample,onCopied): Staged` 只由内部固定材料工厂构建，测试故障注入不改变默认真实关闭/断连。
 
@@ -182,12 +182,12 @@ Future<void> pause(String taskId) async {
 
 - 进程随机会话、单协调队列不依赖 Activity；detach 只解绑监听。命令深复制并重新解析，固定完整执行键、commandId、会话、期望版本及 URL。原生只接受 Int/Long 计数，拒绝负数、未知版本、控制字符、非法名称和嵌套身份不匹配。
 - register 原子登记执行及 NULL 未知命令结果；acceptWorker 同事务保存 queued 接受结果及 worker_authorizations。不可变 enqueue 结果与后续递增 worker 事实分离；同 commandId/规范化载荷重放，不同载荷拒绝。未知 NULL 结果不是重跑 HTTP 的许可。
-- v1→v7 保留旧历史并依次补材料、worker、恢复/候选/分支及取消清理表；v2–v6 仅补后续表。SQLiteOpenHelper 同事务迁移 DDL 与 user_version，未知版本拒绝，失败保留数据库；第二 DDL 失败回滚前一 DDL、版本和新意图，回滚失败不覆盖首异常。迁移、回滚及未知版本保留断言已在 API37 模拟器真实 SQLite 执行；不代表其他 API 或真机已验证。
+- v1→v8 依次保留历史并补表，v8 增 completed_sources；SQLiteOpenHelper 同事务迁移 DDL/user_version，未知版本拒绝、失败留库且保留首异常。旧v7迁移/回滚曾在API37真实执行；当前v8迁移及释放故障22项instrumentation只编译，不能据此宣称设备通过，见[文件契约](file-storage.md)。
 - materials 以 command_id 为主键，保存完整执行归属和唯一 payload/facts 私有路径；外键引用命令和执行。worker_authorizations 以 enqueue/resume command_id 为主键，保存 session、engine、generation、version、allocated、stop、finished；完整命令和 task 归属仍在事务内核验，不能仅信任外键。
 - newTransfer 捕获完整命令/授权 URL；run 在建目录前拒绝 URL 替换。分配事务重查命令载荷、当前会话/执行/代次、授权版本、未停止/未完成及未消费条件，再消费一次性分配权并登记材料；旧 pending 路径仍要求 result=NULL，旧库命令不自动升级为 worker 权限。一个命令不能二次分配，即使原文件不存在也不能重下。
 - 原生 Context.filesDir 是唯一私有根，不使用 Dart staging 路径授权；拒绝根别名和 symlink 暂存目录。先提交 UUID 双文件归属，后以 CREATE_NEW+NOFOLLOW_LINKS 排他创建 facts/part，再请求网络；失败保留材料。空 staging 目录可能先存在，不授予恢复/删除权。私有 sandbox 排除同 UID 恶意写入者，未承诺完全 TOCTOU 安全或目录项 fsync。
 - worker、stop、终态及暂停结果在同一事务核对完整命令、会话、执行键、最新代次/版本、pending/finished 条件；持久 cancel 不可被 pause、running 或 publishing 撤销。终态 checkpoint 与暂停命令结果同事务提交，成功结果丢失后同 checkpoint 重试不再分配版本，不同 checkpoint 拒绝。
-- inspect/inspectMaterials 非破坏，不安排网络、不清理材料；facts 仅诊断，不能凭文件存在推定完成/可恢复/可删除。原生 ack 仅核对已有回执/归属/高水位，普通确认保留材料，当前所有非空 releaseResumeRefs 仍拒绝。
+- inspect/inspectMaterials 非破坏，不安排网络或清理；facts 仅诊断，不能凭存在认定完成/可恢复/可删除。普通/旧 ack 保源；当前 v8 支持经完整业务完成及发布身份校验的显式 complete: 引用释放，见[文件契约](file-storage.md)。
 
 #### 恢复材料、公开接受事务与实际 GET 安全门
 
@@ -231,7 +231,7 @@ Future<void> pause(String taskId) async {
 - cancel_cleanups 保存 command_id、完整 key、intent_version、phase、result；cancel_cleanup_members 保存 source_id、配对路径和各成员 done。commands.result 是不可变接受结果，cleanup.result 仅在全部删除和完成回执事务成功后首次写入；完成回执仍为 cancelling/error=null、保留字节，不制造 completed。
 - 清单从原生日志读取，不扫描目录。原件完整 key 与 enqueue 命令一致；候选只要 source root 或 resume 命令任一边关联当前 key，就必须两边一致，并核对 candidate proof 的 resume/source/facts 与 operation。finish 前重新比较当前完整归属集合，任一冲突整集合零删除。
 - OwnedMaterialCleanup.run(pairs,deleted) 先验证整集合 canonical 私有根/父目录、唯一 UUID .part/.facts 配对、NOFOLLOW 普通文件，再逐成员删除并持久 done。已登记 missing 幂等；删除后 done 保存失败可显式重试。任一 IO/持久失败保留 pending，不宣称跨文件原子；未知孤儿、用户目标、普通/旧 ack 均无删除授权。
-- 真实停止/关闭错误阻止原 cancel 清理成功，保留材料和诊断；持久 stop/finished/retired 阻断迟到 callback 新增证明。该保证依赖单 Runtime 串行门和私有 sandbox，不证明跨连接调度或同 UID 恶意替换安全。发布完成/确认重下的非空 releaseResumeRefs 仍拒绝。
+- 真实停止/关闭错误阻止原 cancel 清理成功，保留材料和诊断；持久 stop/finished/retired 阻断迟到 callback 新增证明。依赖单 Runtime 串行门及私有 sandbox，不证明同 UID 恶意替换安全。completed 非空释放现已实现，确认重下等其他非空引用不能因此任意释放，见[文件契约](file-storage.md)。
 - HTTP identity、连接15s/读取30s，最多10跳、每跳重新校验无认证 http/https 和 visited 循环检测；新下载只接受200，严格验证编码、Content-Length 和已知长度 EOF。64KiB 缓冲、64位计数、未知 total=null、独立单调字节样本、增量 SHA-256；周期 force 最多每秒，不全文件重扫。
 - StageFailure/Failure 保留 JOURNAL/NETWORK/HTTP/FILE 阶段、稳定 code、首 cause 及 suppressed 关闭错误；非200/redirect/编码/长度为 httpFailure，SocketTimeout 为 timeout，其他网络为 networkUnavailable，Journal 为 persistenceFailure，文件为 fileWriteFailure。不得通过匹配原始异常字符串分类。fileUse 确保 Staged 返回前实际关闭；关闭失败不能认证 paused/staged。最终 disconnect 仍是 run 屏障的一部分。
 - 输出关闭后固定一次停止原因，facts 与返回使用同一快照；之后的取消由 Coordinator 按持久意图协调，不回改冻结事实。公开 resume 复用安全 Range/验证器/prefix/candidate 门，拒绝不安全资源时返回 stateConflict/restartRequired，保留原件，不误报 fileWriteFailure 或未经确认重下。
@@ -253,7 +253,7 @@ Future<void> pause(String taskId) async {
 | 恢复复制/EOF/force/close/候选登记失败 | 保留原件、旧 proof 与已登记 candidate；不认证内部 staged 或用户完成 |
 | 通知权限拒绝、后台启动受限、系统 timeout/destroy | permissionDenied 或 backgroundRestricted；已接受的启动先履行 promotion，再拒绝下载授权；失败只停止/保存所属任务且不重试，通知请求 UI 未实现 |
 | 取消归属冲突、删除/完成保存失败 | stateConflict 或 cleanupFailure；不虚报清理完成，保留可重放意图和诊断 |
-| 普通/旧 ack 或非空 releaseResumeRefs | 普通确认不删材料；非空引用仍 materialReleaseUnavailable |
+| 普通/旧 ack；非法非空 releaseResumeRefs | 普通/旧确认保源；仅经完整授权的当前 completed 集合允许显式释放，见文件契约 |
 | 公开 resume 无安全 proof/强 ETag、known total 且 offset==total | stateConflict/restartRequired；不从零请求、不自动发布 |
 | 新分支后重放历史同终态；改变 checkpoint 载荷 | 原历史结果幂等、head 不变；变化载荷拒绝 receiptPayload |
 
@@ -266,7 +266,7 @@ Future<void> pause(String taskId) async {
 
 ### 6. Tests Required
 
-独立 Gradle `:app:testDebugUnitTest :app:connectedDebugAndroidTest :app:assembleDebug` 退出0，debug APK成功；93项 JVM（协议5＋HTTP20＋Coordinator30＋Lifecycle12＋Resume23＋Cleanup3）实际执行，零失败/错误/跳过，flutter analyze 退出0且干净。Dart 未改，沿用前轮独立102/102。证据 `/tmp/android-fgs-race-independent-gradle.log`、`/tmp/android-fgs-race-independent-jvm/`、`/tmp/android-fgs-race-independent-analyze.log`；历史失败/中断不计通过。
+以下记录旧 v7/FGS 阶段历史：独立 Gradle `:app:testDebugUnitTest :app:connectedDebugAndroidTest :app:assembleDebug` 退出0，93 JVM、analyze/debug APK及API37设备通过；Dart沿用前轮102项。历史证据 `/tmp/android-fgs-race-independent-gradle.log`、`/tmp/android-fgs-race-independent-jvm/`、`/tmp/android-fgs-race-independent-analyze.log`。当前 v8 的最新93 JVM强制重跑通过、22 instrumentation仅编译，不继承旧设备通过声明；详见[文件契约](file-storage.md)。
 
 - 生产 Lifecycle/Stop/Coordinator 确定性回调/latch：旧 idle/new enqueue/旧 destroy、新旧实例、启动失败立即撤权、foreground/ready 间失效、同实例多个 start 的 timeout、阻塞断连与取消优先。
 - 真实 loopback HTTP/文件：最多两个 worker、未知长度、持久后事件、幂等命令、失败 pause、cancel 优先、终态保存失败不饿死其他下载、显式补存无新 HTTP、提交结果丢失/并发补存/身份变化；Journal 为 host fake，不能称真实 Android SQLite。
@@ -279,7 +279,7 @@ Future<void> pause(String taskId) async {
 - Instrumentation runner 逐 case 报 start=1/pass=0/failure=-2 和 class/test/current/numtests；finish 及 adb 退出0不能代替 XML 的非零用例数与失败状态。后台 responder 捕获所属 case 的异常队列，join 超时/中断使该 case 失败，迟到异常不得归入下个 case。TCP read 无固定分片大小，暂停夹具按累计阈值等待，保留精确 offset/Range/hash 断言；失败历史 XML 须证明 Gradle 拒绝且后续 case 继续。
 - [Runtime设备脚本](../../../integration_test/android_engine_runtime_check.py) 独立退出0，`/tmp/android-fgs-race-independent/summary.json` 的七个完成case为 lifecycle、revokedBeforePauseCallback、revokedBeforeCancelCallback、permissionChangedBeforeCallback、denied、deniedPromotion、inspectAfterKill，各XML 1/0/0/0。实际 MainActivity→Runtime.coordinator→Service→worker→SQLite，绕过MethodChannel编码，不是Flutter业务E2E。Activity finish/重开期间继续；pause303104字节/version7后1.2秒不变，Range bytes=303104-/If-Range runtime-v1实际206，cancel311296字节/version13/cancelling/error=null且1个原件双文件及1个候选双文件均清理。HTTP恰3次，seedKill仅准备不算通过；跨强杀同engineId正字节旧记录可读，重开仅inspect观测窗口新增GET为0。
 - 三个系统接受启动后的交错真实注入PAUSE/CANCEL/通知权限变化，要求零新增HTTP/材料/字节、持久停止或failed/permissionDenied；各等待12秒且捕获logcat无FGS启动超时。afterServiceStartAccepted默认null，仅在主线程真实start返回、pending锁释放后及Service callback前作测试屏障。通知测试临时shell身份真实撤权并finally释放；反射失败即用例失败，不替换权限判断。旧实例promotion失败归属和多start主要为源码/JVM证据，未称设备逐项故障注入。
-- 后续执行 API29/30/33/35/36真机、完整MethodChannel、真实系统timeout/reboot/natural kill/background限制、平台promotion拒绝、TLS/真实磁盘force-close及大文件；目录fsync、非空release ack和用户目录发布仍未验收。
+- 后续执行 API29/30/33/35/36真机、完整MethodChannel、真实系统timeout/reboot/natural kill/background限制、平台promotion拒绝、TLS/真实磁盘及大文件；v8释放设备运行、目录fsync与用户目录平台完整验收仍缺，见[文件契约](file-storage.md)。
 
 ### 7. Wrong vs Correct
 

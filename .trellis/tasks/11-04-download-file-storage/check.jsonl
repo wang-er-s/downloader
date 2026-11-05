@@ -4,3 +4,4 @@
 {"file": ".agents/specs/download-manager/design.md", "reason": "修订后的具体签名、数据模型、安全协议和平台验证门槛"}
 {"file": ".trellis/spec/frontend/persistence.md", "reason": "已有领域DTO及业务库事务边界"}
 {"file": ".trellis/spec/frontend/plugin-engine.md", "reason": "插件执行日志与材料释放归属"}
+{"file": ".trellis/spec/frontend/file-storage.md", "reason": "FileStorage工厂、发布恢复、completed显式释放与平台验证边界"}

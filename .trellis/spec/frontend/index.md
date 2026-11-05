@@ -4,7 +4,7 @@
 
 适用于本仓库 Flutter 应用及各平台适配：Android、macOS、Windows 为必需平台，iOS 为希望一并提供、需验证可行性的平台。采用按功能组织目录、MVVM 职责划分、Repository/Service 分层，Riverpod 负责状态管理与依赖注入。复杂业务按需提取 UseCase。
 
-这是已确认的架构约定；领域/执行 DTO、DownloadEngine 与 FileStorage 接口及 AppStore v1 已实现。PluginEngine 与固定9.5.9补丁已接入，桌面局部验证已独立复核，插件子任务仍未验收。Android 桥接、新下载、v6公开resume、v7显式取消清理及FGS启动后撤权修复已独立局部PASS；普通/旧ack不删除材料。最新93项JVM、静态分析与debug APK通过，Dart未改沿用前轮独立102项。API37模拟器独立实跑20项SQLite及7项Runtime/Service用例，均零失败/错误/跳过；覆盖Activity detach/重连、安全206、取消归属清理、启动后PAUSE/CANCEL/通知撤权及强杀重开观测窗口新增GET为0。Runtime夹具绕过MethodChannel编解码，完整通道、API29/30/33/35/36真机矩阵与完整引擎仍BLOCK。非空releaseResumeRefs仍拒绝，无安全proof续传仍restartRequired。具体契约及证据边界见architecture.md。`lib/main.dart`仍为计数器，Repository、Riverpod、用户目录发布与业务界面尚未实现。
+领域/执行 DTO、DownloadEngine、FileStorage 与 AppStore v1 已实现；PluginEngine、AndroidEngine 及文件发布/完成源显式 ack 释放已有局部独立证据。当前 Plugin commands.sqlite v2、Android execution v8；普通/旧 ack 不删完整源。最新57 focused（55桥＋2锁）、macOS5引擎＋9文件真实集成、93 JVM 独立 --rerun-tasks 和 flutter analyze 通过。22项 Android instrumentation 本轮仅编译，旧 API37 v7 的20 SQLite＋7 Runtime 为历史通过，不证明 v8。完整 FileStorage PRD 仍 BLOCK/in_progress，Apple/SAF 现存目标删除与用户目录临时副本回收仍是功能缺口；Windows 缺环境，macOS host12/iOS前轮host15不证明最低10.15/14。用户负责 Android 实机，不阻塞其他功能。Repository、Riverpod 与业务 UI 尚未实现，`lib/main.dart` 仍为计数器。具体执行与平台边界见以下规范。
 
 ## 规范入口
 
@@ -13,6 +13,7 @@
 | [架构与跨层契约](architecture.md) | 分层、Riverpod、暂停确认、执行身份、持久回执、字节进度与发布恢复断言 |
 | [领域与持久化契约](persistence.md) | 已有 DTO/JSON、AppStore 事务、四表 v1、确认身份与高水位、异常及真实 SQLite 测试 |
 | [插件执行与恢复契约](plugin-engine.md) | 已实现适配器、独立执行日志、业务确认、prefix 恢复与尚未验收的平台边界 |
+| [文件发布与源释放契约](file-storage.md) | 真实工厂/默认目录、唯一发布日志、取消重放、completed 同事务显式 ack、异步 SQLite 门及平台缺口 |
 
 需求来源：[下载管理器需求](../../../.agents/specs/download-manager/requirements.md)；跨平台方案见 [设计文档](../../../.agents/specs/download-manager/design.md)。功能范围以需求为准；本目录约束如何实现，不扩展需求范围。
 

@@ -29,18 +29,19 @@ Future<void> close();
 
 - 固定 background_downloader 9.5.9 归档，SHA-256 为 `ae55e127f87397b372578fc9474568b879fa78326103c342e00160558d08e527`。保留许可证、PATCHES.md 和可对新归档重放的 downloader.patch，显式 path 依赖；sqlite3 保持精确 3.5.2，不升级 SDK、不加 overrides。
 - open 先注册回调，start 关闭 doTrackTasks、doRescheduleKilledTasks、markDownloadedComplete、autoCleanDatabase，任务 retries=0；参数不能代替原生补丁。桌面重开只登记 detached/waitingRecovery，不自动 enqueue；历史字节不是新进程的单调时钟样本。
-- `commands.sqlite` 为独立 v1 执行库：executions(id,input,plugin_task)、commands(id,payload,result)、acknowledgements(id,payload)，synchronous=FULL。执行身份和 result=NULL 的未知命令结果同事务登记；结果不明先 inspect，不自动重试副作用。同 commandId/载荷重放原结果，不同载荷拒绝。
+- `commands.sqlite` 为独立 v2 执行库，保留 executions(id,input,plugin_task)、commands(id,payload,result)、acknowledgements(id,payload)，新增 complete_sources(id,ref,members)、material_releases(id,ack,done)，synchronous=FULL。v1→v2 事务迁移保留历史，失败/未知版本留库。执行身份和 result=NULL 的未知命令结果同事务登记；结果不明先 inspect，不自动重试副作用。同 commandId/载荷重放原结果，不同载荷拒绝。
 - 每执行目录保存完整、不可变的递增 `<receiptVersion>.json`；flush 唯一 pending 后 rename 发布，再通知 Dart。桌面每次写入独立 sqlite3 连接，在 writer.sqlite 上设置 busy_timeout=30000，并以 BEGIN IMMEDIATE 串行保护 latest→merge→版本分配→flush→rename；回收使用同一门。不能用 POSIX 同进程文件锁或 isolate 内队列替代。
 - JSON 是已发布版本依据；发布后 COMMIT 失败也不能重用该版本，失败 pending 保留。回滚尽力执行并保留首个异常。不宣称 SQLite 与文件发布为同一文件系统事务，也不保证跨文件集合的事务快照。
 - iOS Dart 检查点进入原生 recordExecution，与 Swift 回调共用 NSRecursiveLock；legacy 读取非破坏。Dart 不绕过原生锁回收 iOS 历史，保守保留不能视为完整材料释放验收。
 - inspect 非破坏，空集合也返回 ownerSessionId/sequence；集合保留最新快照及待确认历史。事件只发布当前进程新版本；初始读取/解析错误不伪造成空列表。
-- acknowledge 必须与注入 AppStore 已提交的完整 ReceiptAck 一致；现存同版本业务回执也核对完整载荷。普通 paused/failed 不释放。仅当前 cancelling/publishing 的明确 resumeRef 可释放该执行登记材料；旧确认不得清较新材料。
-- 材料集合包含 resumeData.data 与 ownedMaterials；先校验整个集合的规范化路径、真实父目录、symlink 和私有归属，再删除任意成员。IO 删除失败传播异常、不推进执行确认水位，集合保留供幂等重试；不宣称多个文件删除原子。
+- acknowledge 必须与注入 AppStore 已提交的完整 ReceiptAck 一致，并核对完整业务回执。普通 paused/failed/空 ack 不释放完整源，旧确认不清新材料；既有取消/发布恢复引用与 completed 显式引用分别校验。completed 以 resumeRef 暴露 complete: opaque 集合引用，unsupported 不代表可续传；业务 completed/完整回执/最终 FileLocation/published PublishOperation 和完整 ack 同 AppStore 事务提交后才确认，详见[文件契约](file-storage.md)。
+- completed 释放先整集合核验规范路径、真实父目录、私有归属及普通文件/登记缺失，symlink/目录/FIFO 等任一非法则零删除。异步等待后、逐成员删除前与最终 ack 前重读已提交完整 ack、业务完成/发布身份及当前完整回执。持久 intent→delete/done→ack，删除或 done/ack 保存失败不推进最终确认，重开重放；用户文件/用户目录临时副本不在集合，不承诺多文件原子。
 - requiredStartByte 与 materialHash 只认证持久 prefix；允许额外未提交 tail，不能据实际文件长度提升检查点或截断原件。实际 GET 需强 ETag、206、完整 Content-Range/长度与已知总长一致，HTTP 200/416、坏响应或坏 prefix 返回 restartRequired，确认前不从零请求。
 - 原件有 tail 时，安全响应后先持久 recoveryOperation{id,source,candidate,offset,phase:copying} 与 ownedMaterials，再排他创建 candidate、流式复制认证 prefix，复核后登记 ready 和新 resumeData，才向新文件追加。复制失败不进入传输 finally，不认证原 tail；重试分配新 candidate，并保留旧引用。
 - 未知总长独立提供真实累计字节，totalBytes 为 null，不从比例反推；恢复/跨进程重置速度窗口。
 - 桌面 [MaterialDigest](../../../third_party/background_downloader/lib/src/desktop/material_digest.dart) 使用公开 SHA-256、固定 1MiB 分块链、32 字节链状态及最多 1MiB 尾部；`bd-chain-sha256-v1:` 明确区别于普通文件 SHA-256。seed/block/end 域分离与 uint64BE 总长度构造以任务设计为准，snapshot 不消费状态，不随文件长度累积证明列表。
 - 周期与停止检查点不重读历史文件；先 flush/close 成功，再核对实际长度、字节计数和摘要长度，offset/hash 同回执提交。失败保留旧认证检查点及材料，禁止 finally 提升失败检查点。恢复仍线性读取磁盘认证 prefix，并重建运行摘要；旧无前缀 64 位十六进制 SHA-256 可验证，未知格式拒绝。安全 GET、prefix fork、原 tail 和受控释放边界不变。
+- PluginEngine.publicationJournal 为 FileStorage 唯一执行侧写入入口，publications.sqlite v1 保存发布阶段。执行门 execution.gate.sqlite→发布门 publications.sqlite.gate.sqlite：独立连接 BEGIN IMMEDIATE、busy_timeout=0，BUSY/LOCKED 异步等待，禁止同门重入；回滚异常也 finally 关闭连接。这与上文 vendor writer.sqlite 原有版本分配锁不同，不能替换成阻塞长异步 IO 的等待，见[文件契约](file-storage.md)。
 
 ## 4. Validation & Error Matrix
 
@@ -51,7 +52,7 @@ Future<void> close();
 | 业务尚未提交确认、同版本完整回执不同 | stateConflict；不删除材料、不推进确认 |
 | 实际响应不安全或本地 prefix 损坏 | restartRequired；原件长度/hash 不变，不从零请求 |
 | prefix 复制中断 | 保留 copying/原 checkpoint/原件及全部 candidate 引用；下次分配新 candidate |
-| ownedMaterials 任一成员越界或为 symlink | stateConflict / materialOwnership；整个集合均不开始删除 |
+| ownedMaterials 任一成员越界、symlink 或非普通类型 | stateConflict / materialOwnership；completed 整集合预验失败零删除 |
 | 关闭/flush/日志写入失败 | 异常完成，不虚报 paused/complete，保留原始错误与可定位材料 |
 | 文件删除 IO 失败 | 抛错、确认水位不推进，已登记集合可幂等重试 |
 | 平台缺实际证据 | 保持未验收，不用编译或 fake 测试替代 |
@@ -65,6 +66,8 @@ Future<void> close();
 ## 6. Tests Required
 
 当前独立复核：基础 48 项、定向 34 项（[摘要](../../../third_party/background_downloader/test/material_digest_test.dart) 5 项含 Python hashlib 独立固定向量、[HTTP 边界](../../../third_party/background_downloader/test/execution_boundary_test.dart) 28 项、[日志并发](../../../third_party/background_downloader/test/execution_journal_race_test.dart) 1 项且 400/400）、[真实 macOS 集成](../../../integration_test/plugin_engine_test.dart) 1 项，以及 flutter analyze 通过。整个插件子任务尚未通过。
+
+以上为插件阶段历史证据。后续 FileStorage/completed 释放最新独立结果为57 focused（55桥＋2真实锁）、macOS5引擎＋9文件集成、93 JVM 强制重跑及 analyze 干净；覆盖异步业务取消竞争、晚目录零删除、done/最终 ack 失败重开与双 isolate 门。Android v8 的22设备夹具仅编译；完整平台边界见[文件契约](file-storage.md)。
 
 - 强验证器/Range/总长/本地损坏、未知长度 EOF 前增长、真实暂停继续、失败 pending、复制故障与重试；copying、旧引用及原件 hash 必须保留。
 - 三处交付中断是适配器重建与真实 SQLite 故障注入；确认前未提交拒绝，旧确认/恶意路径/symlink/非法晚成员不误删材料；不能称作三次 OS 强杀。

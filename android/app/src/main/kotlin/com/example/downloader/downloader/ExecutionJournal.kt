@@ -10,8 +10,9 @@ import org.json.JSONObject
 internal class ExecutionJournal(
     context: Context,
     name: String = "android_execution_v1.db",
-) : SQLiteOpenHelper(context.applicationContext, name, null, 7) {
+) : SQLiteOpenHelper(context.applicationContext, name, null, 8) {
     private val privateRoot = context.applicationContext.filesDir.canonicalFile
+    private val publicationDatabase = context.applicationContext.getDatabasePath("android_publications_v1.db")
 
     override fun onConfigure(db: SQLiteDatabase) {
         db.execSQL("PRAGMA foreign_keys=ON")
@@ -32,6 +33,7 @@ internal class ExecutionJournal(
         createCandidateProofs(db)
         createResumeWorkers(db)
         createCleanups(db)
+        createCompletedReleases(db)
     }
 
     override fun onUpgrade(
@@ -41,7 +43,7 @@ internal class ExecutionJournal(
     ) {
         // SQLiteOpenHelper wraps this migration and user_version update in one transaction.
         // Never rewrite the v1 tables or discard an old database on failure.
-        if (oldVersion !in 1..6 || newVersion != 7) {
+        if (oldVersion !in 1..7 || newVersion != 8) {
             throw EngineProtocolException("protocolMismatch", "journalVersion")
         }
         if (oldVersion == 1) createMaterials(db)
@@ -49,7 +51,12 @@ internal class ExecutionJournal(
         if (oldVersion <= 3) createResume(db)
         if (oldVersion <= 4) createCandidateProofs(db)
         if (oldVersion <= 5) createResumeWorkers(db)
-        createCleanups(db)
+        if (oldVersion <= 6) createCleanups(db)
+        createCompletedReleases(db)
+    }
+
+    private fun createCompletedReleases(db: SQLiteDatabase) {
+        db.execSQL("CREATE TABLE completed_sources (engine TEXT NOT NULL, generation INTEGER NOT NULL, ref TEXT NOT NULL UNIQUE, members TEXT NOT NULL, ack TEXT, done TEXT NOT NULL DEFAULT '[]', PRIMARY KEY(engine,generation), FOREIGN KEY(engine,generation) REFERENCES executions(engine,generation))")
     }
 
     private fun createCleanups(db: SQLiteDatabase) {
@@ -1357,6 +1364,9 @@ internal class ExecutionJournal(
                 null to members
             }
         prepared.first?.let { return it }
+        // Stop and the durable cancel intent already exist. This gate only
+        // prevents destructive release while a user-directory result is unclear.
+        assertPublicationCleanupAllowed(command.key)
         try {
             OwnedMaterialCleanup(privateRoot).run(prepared.second.map { OwnedMaterialCleanup.Pair(it.second, it.third) }, { path ->
                 transaction { db ->
@@ -1418,18 +1428,135 @@ internal class ExecutionJournal(
         }
     }
 
-    fun acknowledge(ack: NativeAck) =
-        transaction { db ->
-            val current = execution(db, ack.key) ?: conflict("staleExecution")
-            if (ack.receiptVersion > current.first) conflict("staleReceipt")
-            // Ack has no verifiable publication/restart intent in this native schema.
-            // Explicit cancel cleanup is separate; ordinary and old acknowledgements never delete.
-            if (ack.releaseResumeRefs.isNotEmpty()) conflict("materialReleaseUnavailable")
-            db.execSQL(
-                "UPDATE executions SET ack=MAX(ack,?) WHERE engine=? AND generation=?",
-                arrayOf<Any>(ack.receiptVersion, ack.key.engineId, ack.key.generation),
-            )
+    private fun assertPublicationCleanupAllowed(key: ExecutionKey) {
+        if (!publicationDatabase.exists()) return
+        SQLiteDatabase.openDatabase(publicationDatabase.path, null, SQLiteDatabase.OPEN_READONLY).use { db ->
+            db.rawQuery("PRAGMA user_version", null).use { it.moveToFirst(); if (it.getInt(0) != 1) throw EngineProtocolException("cleanupFailure", "publicationVersion") }
+            db.rawQuery("SELECT record FROM publications WHERE execution=?", arrayOf(encode(key.json()))).use { rows ->
+                while (rows.moveToNext()) {
+                    if (JSONObject(rows.getString(0)).getString("phase") != "cleaned") throw EngineProtocolException("cleanupFailure", "publicationPending")
+                }
+            }
         }
+    }
+
+    /** FileStorage may only publish the current complete, native-owned source. */
+    fun publicationSource(operation: Map<String, Any?>): java.io.File = transaction { db ->
+        val key = EngineProtocol.key(EngineProtocol.map(operation["key"]))
+        val current = execution(db, key) ?: conflict("staleExecution")
+        val head = db.rawQuery("SELECT payload FROM receipts WHERE engine=? AND generation=? AND version=?",
+            arrayOf(key.engineId, key.generation.toString(), current.first.toString())).use {
+            if (!it.moveToFirst()) conflict("staleReceipt")
+            decode(it.getString(0))
+        }
+        val input = db.rawQuery("SELECT input FROM executions WHERE engine=? AND generation=?",
+            arrayOf(key.engineId, key.generation.toString())).use { it.moveToFirst(); decode(it.getString(0)) }
+        val source = EngineProtocol.string(operation, "sourceRef")
+        val length = EngineProtocol.number(operation, "sourceLength")
+        if (head["state"] !in setOf("publishing", "completed") || head["error"] != null ||
+            head["stagingLocation"] != source || (head["downloadedBytes"] as Number).toLong() != length ||
+            (head["totalBytes"] != null && (head["totalBytes"] as Number).toLong() != length) ||
+            encode(input["directory"]) != encode(operation["directory"])) conflict("publicationSource")
+        val file = java.io.File(source)
+        if (!file.isAbsolute || file.canonicalFile != file.absoluteFile ||
+            !file.canonicalPath.startsWith(privateRoot.path + java.io.File.separator) ||
+            !java.nio.file.Files.isRegularFile(file.toPath(), java.nio.file.LinkOption.NOFOLLOW_LINKS) || file.length() != length) {
+            conflict("publicationSource")
+        }
+        val registered = inspectMaterials(key).map { it.first } + inspectRecoveries(key).mapNotNull { it["candidate"] as? String }
+        if (source !in registered) conflict("publicationSource")
+        file
+    }
+
+    /** Reconcile after filesystem publication; retrying never creates a file. */
+    fun publicationReceipt(operation: Map<String, Any?>, file: Map<String, Any?>) = transaction { db ->
+        val key = EngineProtocol.key(EngineProtocol.map(operation["key"]))
+        val current = execution(db, key) ?: conflict("staleExecution")
+        val head = db.rawQuery("SELECT payload FROM receipts WHERE engine=? AND generation=? AND version=?",
+            arrayOf(key.engineId, key.generation.toString(), current.first.toString())).use {
+            it.moveToFirst(); decode(it.getString(0))
+        }
+        if (head["publishedLocation"] != null) {
+            if (encode(head["publishedLocation"]) != encode(file)) conflict("publicationIdentity")
+            if ((head["resumeRef"] as? String)?.startsWith("complete:") == true) return@transaction
+        }
+        if (head["state"] !in setOf("publishing", "completed") || current.first == Long.MAX_VALUE) conflict("publicationState")
+        val version = current.first + 1
+        val members = cleanupMembers(db, key)
+        if (head["stagingLocation"] !in members.map { it.second }) conflict("materialOwnership")
+        val ref = "complete:" + java.util.UUID.randomUUID().toString()
+        db.execSQL("INSERT INTO completed_sources(engine,generation,ref,members) VALUES(?,?,?,?)",
+            arrayOf<Any?>(key.engineId, key.generation, ref, encode(mapOf("pairs" to members.map { listOf(it.second, it.third) }))))
+        val receipt = head + mapOf("resumeRef" to ref, "receiptVersion" to version, "state" to "completed", "publishedLocation" to file,
+            "publishOperation" to (operation + mapOf("phase" to "published", "targetRef" to file["locator"], "identity" to file["identity"])))
+        db.execSQL("INSERT INTO receipts(engine,generation,version,payload) VALUES(?,?,?,?)",
+            arrayOf<Any?>(key.engineId, key.generation, version, encode(receipt)))
+        db.execSQL("UPDATE executions SET version=? WHERE engine=? AND generation=?", arrayOf<Any?>(version, key.engineId, key.generation))
+    }
+
+    fun acknowledge(ack: NativeAck) {
+        if (ack.releaseResumeRefs.isEmpty()) {
+            transaction { db ->
+                val current = execution(db, ack.key) ?: conflict("staleExecution")
+                if (ack.receiptVersion > current.first) conflict("staleReceipt")
+                db.execSQL("UPDATE executions SET ack=MAX(ack,?) WHERE engine=? AND generation=?",
+                    arrayOf<Any>(ack.receiptVersion, ack.key.engineId, ack.key.generation))
+            }
+            return
+        }
+        releaseCompleted(ack)
+    }
+
+    /** No transfer is scheduled. Intent and each member's done bit survive IO/commit failure. */
+    internal fun releaseCompleted(ack: NativeAck, remove: (java.io.File) -> Unit = { java.nio.file.Files.deleteIfExists(it.toPath()) }) {
+        val payload = encode(mapOf("key" to ack.key.json(), "version" to ack.receiptVersion, "refs" to ack.releaseResumeRefs))
+        fun validate(db: SQLiteDatabase) {
+            val current = execution(db, ack.key) ?: conflict("staleExecution")
+            if (current.first != ack.receiptVersion) conflict("staleReceipt")
+            db.rawQuery("SELECT MAX(generation) FROM executions WHERE engine=?", arrayOf(ack.key.engineId)).use {
+                it.moveToFirst(); if (it.getLong(0) != ack.key.generation) conflict("staleExecution")
+            }
+            db.rawQuery("SELECT command_id FROM worker_authorizations WHERE engine=? AND generation=? AND finished=0 AND command_id NOT IN (SELECT command_id FROM retired_workers)", arrayOf(ack.key.engineId, ack.key.generation.toString())).use {
+                if (it.moveToFirst()) conflict("transferUnavailable")
+            }
+            val head = db.rawQuery("SELECT payload FROM receipts WHERE engine=? AND generation=? AND version=?", arrayOf(ack.key.engineId, ack.key.generation.toString(), ack.receiptVersion.toString())).use {
+                if (!it.moveToFirst()) conflict("staleReceipt"); decode(it.getString(0))
+            }
+            if (head["state"] != "completed" || head["publishedLocation"] == null ||
+                EngineProtocol.map(head["publishOperation"])["phase"] != "published" ||
+                ack.releaseResumeRefs != listOf(head["resumeRef"])) conflict("materialOwnership")
+        }
+        val prepared = transaction { db ->
+            validate(db)
+            db.rawQuery("SELECT ref,members,ack,done FROM completed_sources WHERE engine=? AND generation=?", arrayOf(ack.key.engineId, ack.key.generation.toString())).use {
+                if (!it.moveToFirst() || ack.releaseResumeRefs != listOf(it.getString(0))) conflict("materialOwnership")
+                if (!it.isNull(2) && it.getString(2) != payload) conflict("ackPayload")
+                val pairs = (decode(it.getString(1))["pairs"] as List<*>).map { pair ->
+                    val paths = pair as List<*>; OwnedMaterialCleanup.Pair(paths[0] as String, paths[1] as String)
+                }
+                val done = JSONArray(it.getString(3)).let { array -> (0 until array.length()).map { index -> array.getString(index) }.toMutableSet() }
+                db.execSQL("UPDATE completed_sources SET ack=? WHERE engine=? AND generation=?", arrayOf<Any?>(payload, ack.key.engineId, ack.key.generation))
+                pairs to done
+            }
+        }
+        try {
+            OwnedMaterialCleanup(privateRoot).run(prepared.first, { path ->
+                transaction { db ->
+                    validate(db)
+                    prepared.second.add(path)
+                    db.execSQL("UPDATE completed_sources SET done=? WHERE engine=? AND generation=?", arrayOf<Any?>(JSONArray(prepared.second.toList()).toString(), ack.key.engineId, ack.key.generation))
+                }
+            }, { file ->
+                transaction { db -> validate(db); if (file.path !in prepared.second) remove(file) }
+            })
+        } catch (error: Exception) {
+            throw EngineProtocolException("cleanupFailure", "materialOwnership").also { it.addSuppressed(error) }
+        }
+        transaction { db ->
+            validate(db)
+            db.execSQL("UPDATE executions SET ack=MAX(ack,?) WHERE engine=? AND generation=?", arrayOf<Any?>(ack.receiptVersion, ack.key.engineId, ack.key.generation))
+        }
+    }
 
     private fun execution(
         db: SQLiteDatabase,

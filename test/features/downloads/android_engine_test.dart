@@ -357,6 +357,20 @@ void main() {
       expect(calls, isEmpty);
     },
   );
+  test('completed release uses exact AppStore transaction and refuses path authorization', () async {
+    final operation = PublishOperation.fromJson({...f.publication.toJson(), 'phase': 'published', 'targetRef': f.location.locator, 'identity': f.location.identity});
+    final receipt = EngineReceipt.fromJson({...f.receipt().toJson(), 'state': 'completed', 'resumeRef': 'complete:opaque', 'publishedLocation': f.location.toJson(), 'publishOperation': operation.toJson()});
+    final release = ReceiptAck(key: f.key, receiptVersion: 1, releaseResumeRefs: ['complete:opaque']);
+    final task = DownloadTask.fromJson({...f.task().toJson(), 'status': 'completed', 'engineReceipt': receipt.toJson(), 'fileLocation': f.location.toJson(), 'publishOperation': operation.toJson()});
+    store.transaction((tx) { tx.saveTask(f.task()); expect(tx.commitReceipt(task, release), isTrue); });
+    respond = (call) => call.method == 'inspect' ? snapshot(receipts: [receipt]) : null;
+    await expectLater(engine.acknowledge(ReceiptAck(key: f.key, receiptVersion: 1, releaseResumeRefs: [f.location.locator])), throwsA(failure(FailureCode.stateConflict, 'uncommittedAcknowledgement')));
+    expect(calls, isEmpty);
+    await engine.acknowledge(release);
+    expect(calls.map((call) => call.method), ['inspect', 'acknowledge']);
+    expect((calls.last.arguments as Map)['releaseResumeRefs'], ['complete:opaque']);
+  });
+
   test(
     'committed receipt matches entire native payload before flat ack',
     () async {
@@ -432,7 +446,7 @@ void main() {
     },
   );
   test(
-    'removed task retains ack, native material release error and business row',
+    'removed task retains ack and cannot authorize completed source release',
     () async {
       final release = ReceiptAck(
         key: f.key,
@@ -451,10 +465,10 @@ void main() {
       await expectLater(
         engine.acknowledge(release),
         throwsA(
-          failure(FailureCode.stateConflict, 'materialReleaseUnavailable'),
+          failure(FailureCode.stateConflict, 'uncommittedReceipt'),
         ),
       );
-      expect(calls.single.method, 'acknowledge');
+      expect(calls, isEmpty);
       expect(store.readAcknowledgements().single.toJson(), release.toJson());
       expect(store.readTask('task'), isNull);
     },

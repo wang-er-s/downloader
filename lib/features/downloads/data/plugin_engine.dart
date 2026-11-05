@@ -10,6 +10,7 @@ import 'package:sqlite3/sqlite3.dart';
 import '../../../shared/data/app_store.dart';
 import '../domain/download_models.dart';
 import 'download_engine.dart';
+import 'publication_journal.dart';
 
 /// Execution-only adapter. AppStore remains the sole business facts database.
 /// Opening, inspecting, and replaying commands never resubmits a transfer.
@@ -31,7 +32,7 @@ final class PluginEngine implements DownloadEngine {
     root.createSync(recursive: true);
     final database = sqlite3.open('${root.path}/commands.sqlite');
     final version = database.select('PRAGMA user_version').single.values.single;
-    if (version != 0 && version != 1) {
+    if (version != 0 && version != 1 && version != 2) {
       database.close();
       throw PluginEngineException(
         DownloadFailure(
@@ -41,7 +42,9 @@ final class PluginEngine implements DownloadEngine {
       );
     }
     database.execute('PRAGMA synchronous=FULL');
-    database.execute('''
+    database.execute('BEGIN IMMEDIATE');
+    try {
+      database.execute('''
       CREATE TABLE IF NOT EXISTS executions (
         id TEXT PRIMARY KEY, input TEXT NOT NULL, plugin_task TEXT NOT NULL
       );
@@ -51,8 +54,22 @@ final class PluginEngine implements DownloadEngine {
       CREATE TABLE IF NOT EXISTS acknowledgements (
         id TEXT PRIMARY KEY, payload TEXT NOT NULL
       );
-      PRAGMA user_version=1;
+      CREATE TABLE IF NOT EXISTS complete_sources (
+        id TEXT PRIMARY KEY, ref TEXT NOT NULL UNIQUE, members TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS material_releases (
+        id TEXT PRIMARY KEY, ack TEXT NOT NULL, done TEXT NOT NULL
+      );
+      PRAGMA user_version=2;
     ''');
+      database.select('SELECT id,ref,members FROM complete_sources LIMIT 0');
+      database.select('SELECT id,ack,done FROM material_releases LIMIT 0');
+      database.execute('COMMIT');
+    } catch (_) {
+      database.execute('ROLLBACK');
+      database.close();
+      rethrow;
+    }
     final engine = PluginEngine._(
       root,
       database,
@@ -117,7 +134,9 @@ final class PluginEngine implements DownloadEngine {
   final _clock = Stopwatch()..start();
   int _sequence = 0;
   Timer? _timer;
-  Future<void> _tail = Future.value();
+  static final _executionQueues = <String, Future<void>>{};
+  late final String _queueKey = _root.resolveSymbolicLinksSync();
+  Future<void> get _tail => _executionQueues[_queueKey] ?? Future<void>.value();
 
   @override
   Stream<EngineEvent> get events => _events.stream;
@@ -131,8 +150,13 @@ final class PluginEngine implements DownloadEngine {
       decode(Map<String, Object?>.from(jsonDecode(value) as Map));
 
   Future<T> _serial<T>(Future<T> Function() action) {
-    final result = _tail.then((_) => action());
-    _tail = result.then<void>((_) {}, onError: (Object _, StackTrace _) {});
+    final result = _tail.then((_) async {
+      return sqliteFileGate('$_queueKey/execution.gate.sqlite', action);
+    });
+    _executionQueues[_queueKey] = result.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace _) {},
+    );
     return result;
   }
 
@@ -161,7 +185,10 @@ final class PluginEngine implements DownloadEngine {
         : switch (status) {
             0 => DownloadStatus.queued,
             1 => DownloadStatus.running,
-            2 => DownloadStatus.publishing,
+            2 =>
+              raw['publishedLocation'] == null
+                  ? DownloadStatus.publishing
+                  : DownloadStatus.completed,
             3 || 4 => DownloadStatus.failed,
             5 => DownloadStatus.cancelling,
             7 => DownloadStatus.paused,
@@ -176,10 +203,18 @@ final class PluginEngine implements DownloadEngine {
       resumeSupport: resume == null
           ? ResumeSupport.unknown
           : ResumeSupport.supported,
-      resumeRef: resume == null
-          ? null
-          : '${_id(key)}:${raw['materialHash'] ?? plugin.ExecutionJournal.materialToken(resume['data'] as String)}',
+      resumeRef:
+          raw['completeSourceRef'] as String? ??
+          (resume == null
+              ? null
+              : '${_id(key)}:${raw['materialHash'] ?? plugin.ExecutionJournal.materialToken(resume['data'] as String)}'),
       stagingLocation: raw['stagingLocation'] as String?,
+      publishOperation: raw['publishOperation'] == null
+          ? null
+          : PublishOperation.fromJson(jsonObject(raw['publishOperation'])),
+      publishedLocation: raw['publishedLocation'] == null
+          ? null
+          : FileLocation.fromJson(jsonObject(raw['publishedLocation'])),
       error: exception == null
           ? null
           : DownloadFailure(
@@ -194,6 +229,103 @@ final class PluginEngine implements DownloadEngine {
             ),
     );
   }
+
+  /// FileStorage's sole authority is this execution owner. The separate
+  /// execution-side SQLite journal does not add another business writer.
+  SqlitePublicationJournal? _publicationJournal;
+  PublicationJournal
+  get publicationJournal => _publicationJournal ??= SqlitePublicationJournal(
+    directory: _root,
+    executionExclusive: _serial,
+    resolveSource: (operation) async {
+      final rows = _commands.select('SELECT input FROM executions WHERE id=?', [
+        _id(operation.key),
+      ]);
+      if (rows.isEmpty) storageFailure(FailureCode.notFound);
+      final input = _decode(
+        rows.single['input'] as String,
+        EngineTask.fromJson,
+      );
+      final raw = plugin.ExecutionJournal.latest(
+        _directory(_id(operation.key)),
+      );
+      if (input.key != operation.key ||
+          raw == null ||
+          raw['status'] != 2 ||
+          raw['detached'] == true ||
+          raw['stagingLocation'] != operation.sourceRef ||
+          raw['downloadedBytes'] != operation.sourceLength ||
+          (raw['totalBytes'] != null &&
+              raw['totalBytes'] != operation.sourceLength) ||
+          jsonEncode(input.directory.toJson()) !=
+              jsonEncode(operation.directory.toJson())) {
+        storageFailure(FailureCode.stateConflict, '完整下载材料或发布目录不匹配');
+      }
+      return operation.sourceRef;
+    },
+    commitPublished: (operation, file) async {
+      final rows = _commands.select(
+        'SELECT plugin_task FROM executions WHERE id=?',
+        [_id(operation.key)],
+      );
+      if (rows.isEmpty) storageFailure(FailureCode.notFound);
+      final task = plugin.DownloadTask.fromJson(
+        jsonDecode(rows.single['plugin_task'] as String),
+      );
+      final raw = plugin.ExecutionJournal.latest(
+        _directory(_id(operation.key)),
+      );
+      if (raw == null || raw['status'] != 2) {
+        storageFailure(FailureCode.stateConflict);
+      }
+      if (raw['publishedLocation'] != null) {
+        if (jsonEncode(raw['publishedLocation']) != jsonEncode(file.toJson())) {
+          storageFailure(FailureCode.stateConflict);
+        }
+        if (raw['completeSourceRef'] != null) return;
+      }
+      final id = _id(operation.key);
+      final sources = _commands.select(
+        'SELECT ref FROM complete_sources WHERE id=?',
+        [id],
+      );
+      final ref = sources.isEmpty
+          ? 'complete:${DateTime.now().microsecondsSinceEpoch}:${Random.secure().nextInt(1 << 32)}'
+          : sources.single['ref'] as String;
+      if (sources.isEmpty) {
+        final members = <String>{operation.sourceRef};
+        for (final version in plugin.ExecutionJournal.versions(
+          _directory(id),
+        )) {
+          final prior = jsonObject(jsonDecode(version.readAsStringSync()));
+          members.addAll(
+            List<String>.from(prior['ownedMaterials'] as List? ?? []),
+          );
+          if (!Platform.isIOS && prior['resumeData'] is Map) {
+            members.add(
+              jsonValue<String>(jsonObject(prior['resumeData']), 'data'),
+            );
+          }
+        }
+        _commands.execute('INSERT INTO complete_sources VALUES (?,?,?)', [
+          id,
+          ref,
+          jsonEncode(members.toList()),
+        ]);
+      }
+      await _downloader.recordExecution(task, {
+        'completeSourceRef': ref,
+        'publishOperation': {
+          ...operation.toJson(),
+          'phase': 'published',
+          'targetRef': file.locator,
+          'identity': file.identity,
+        },
+        'publishedLocation': file.toJson(),
+      });
+      _poll();
+    },
+  );
 
   EngineSnapshot _snapshot() {
     final latestReceipts = <EngineReceipt>[];
@@ -511,8 +643,22 @@ final class PluginEngine implements DownloadEngine {
   }
 
   @override
-  Future<EngineReceipt> cancel(EngineCommand command) async =>
-      (await _command('cancel', command))!;
+  Future<EngineReceipt> cancel(EngineCommand command) async {
+    final stopped = (await _command('cancel', command))!;
+    await _publicationCleanupGate(command.key);
+    return stopped;
+  }
+
+  Future<void> _publicationCleanupGate(ExecutionKey key) async {
+    final journal = publicationJournal as SqlitePublicationJournal;
+    try {
+      await journal.exclusiveFiles(
+        () async => journal.assertPrivateCleanupAllowed(key),
+      );
+    } on FileStorageException catch (error) {
+      throw PluginEngineException(error.failure);
+    }
+  }
 
   @override
   Future<void> acknowledge(ReceiptAck ack) => _serial(() async {
@@ -564,7 +710,11 @@ final class PluginEngine implements DownloadEngine {
         _conflict('ackPayload');
       }
     }
-    if (ack.releaseResumeRefs.isNotEmpty) {
+    if (ack.releaseResumeRefs.isNotEmpty &&
+        _receipt(ack.key, raw).state == DownloadStatus.completed) {
+      await _releaseCompleted(ack, _receipt(ack.key, raw));
+    } else if (ack.releaseResumeRefs.isNotEmpty) {
+      await _publicationCleanupGate(ack.key);
       final latest = _receipt(ack.key, raw);
       if (ack.receiptVersion != latest.receiptVersion ||
           ![
@@ -618,12 +768,142 @@ final class PluginEngine implements DownloadEngine {
     }
   });
 
+  Future<void> _releaseCompleted(ReceiptAck ack, EngineReceipt latest) async {
+    final id = _id(ack.key);
+    void validateCurrent() {
+      final business = _store.readTask(ack.key.taskId);
+      final committed = _store.readAcknowledgements().where(
+        (a) => a.key == ack.key,
+      );
+      final current = plugin.ExecutionJournal.latest(_directory(id));
+      if (committed.length != 1 ||
+          jsonEncode(committed.single.toJson()) != jsonEncode(ack.toJson()) ||
+          current == null ||
+          jsonEncode(_receipt(ack.key, current).toJson()) !=
+              jsonEncode(latest.toJson()) ||
+          ack.receiptVersion != latest.receiptVersion ||
+          ack.releaseResumeRefs.length != 1 ||
+          ack.releaseResumeRefs.single != latest.resumeRef ||
+          latest.publishedLocation == null ||
+          latest.publishOperation?.phase != PublishPhase.published ||
+          business == null ||
+          business.key != ack.key ||
+          business.status != DownloadStatus.completed ||
+          jsonEncode(business.engineReceipt?.toJson()) !=
+              jsonEncode(latest.toJson()) ||
+          jsonEncode(business.fileLocation?.toJson()) !=
+              jsonEncode(latest.publishedLocation?.toJson()) ||
+          jsonEncode(business.publishOperation?.toJson()) !=
+              jsonEncode(latest.publishOperation?.toJson())) {
+        _conflict('materialStillReferenced');
+      }
+    }
+
+    validateCurrent();
+    for (final row in _commands.select('SELECT input FROM executions')) {
+      final other = _decode(row['input'] as String, EngineTask.fromJson).key;
+      if (other.engineId == ack.key.engineId &&
+          other.generation > ack.key.generation) {
+        _conflict('staleExecution');
+      }
+    }
+    final task = plugin.DownloadTask.fromJson(
+      jsonDecode(
+        _commands.select('SELECT plugin_task FROM executions WHERE id=?', [
+              id,
+            ]).single['plugin_task']
+            as String,
+      ),
+    );
+    await _downloader.waitForExecutionIdle(task);
+    if ((await _downloader.allTasks(
+      allGroups: true,
+    )).any((task) => task.taskId == id)) {
+      _conflict('materialStillReferenced');
+    }
+    final source = _commands.select(
+      'SELECT ref,members FROM complete_sources WHERE id=?',
+      [id],
+    );
+    if (source.isEmpty || source.single['ref'] != latest.resumeRef) {
+      _conflict('unknownMaterial');
+    }
+    final members = (jsonDecode(source.single['members'] as String) as List)
+        .cast<String>();
+    final roots =
+        [await getApplicationSupportDirectory(), await getTemporaryDirectory()]
+            .where((directory) => directory.existsSync())
+            .map((directory) => directory.resolveSymbolicLinksSync())
+            .toList();
+    // AppStore and native callbacks can change while idle/path queries yield.
+    validateCurrent();
+    // Paths are read solely from immutable execution history; private roots add
+    // a boundary, while the opaque reference and exact completed ack authorize IO.
+    for (final path in members) {
+      final file = File(path);
+      final type = FileSystemEntity.typeSync(path, followLinks: false);
+      if (!file.isAbsolute ||
+          !roots.any(
+            (root) => path.startsWith('$root${Platform.pathSeparator}'),
+          ) ||
+          path == latest.publishedLocation!.locator ||
+          (type != FileSystemEntityType.notFound &&
+              type != FileSystemEntityType.file) ||
+          (file.existsSync() && file.resolveSymbolicLinksSync() != path)) {
+        _conflict('unknownMaterial');
+      }
+    }
+    final payload = jsonEncode(ack.toJson());
+    final intent = _commands.select(
+      'SELECT ack,done FROM material_releases WHERE id=?',
+      [id],
+    );
+    if (intent.isNotEmpty && intent.single['ack'] != payload) {
+      _conflict('ackPayload');
+    }
+    final done = intent.isEmpty
+        ? <String>[]
+        : (jsonDecode(intent.single['done'] as String) as List).cast<String>();
+    if (intent.isEmpty) {
+      _commands.execute('INSERT INTO material_releases VALUES (?,?,?)', [
+        id,
+        payload,
+        '[]',
+      ]);
+    }
+    for (final path in members) {
+      if (done.contains(path)) continue;
+      validateCurrent();
+      try {
+        final type = FileSystemEntity.typeSync(path, followLinks: false);
+        if (type != FileSystemEntityType.notFound) {
+          if (type != FileSystemEntityType.file) _conflict('unknownMaterial');
+          await File(path).delete();
+        }
+        done.add(path);
+        _commands.execute('UPDATE material_releases SET done=? WHERE id=?', [
+          jsonEncode(done),
+          id,
+        ]);
+      } on FileSystemException {
+        throw PluginEngineException(
+          DownloadFailure(
+            code: FailureCode.cleanupFailure,
+            message: '私有下载材料释放未完成，可重试确认',
+          ),
+        );
+      }
+    }
+    validateCurrent();
+  }
+
   /// Application teardown only; a View must never own this adapter's lifetime.
   Future<void> close() async {
     _timer?.cancel();
     await _tail;
     _downloader.unregisterCallbacks(group: _group);
     await _events.close();
+    _publicationJournal?.close();
     _commands.close();
   }
 }

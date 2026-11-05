@@ -6,7 +6,7 @@
 
 依据：[需求文档](requirements.md)、[需求评审](review.md)、[Flutter 架构规范](../../../.trellis/spec/frontend/architecture.md)。截图仅作为界面与交互参考，不扩展代理、分享、认证资源、视频解析、搜索、批量管理等首期范围。
 
-**状态：用户已批准进入实施；领域契约与 AppStore v1 已通过独立检查，PluginEngine 与固定 9.5.9 补丁已通过桌面局部复核，插件子任务仍为 BLOCK/in_progress。** 已有接口见[持久化契约](../../../.trellis/spec/frontend/persistence.md)，插件证据见[插件执行契约](../../../.trellis/spec/frontend/plugin-engine.md)。Android 桥接、新下载、公开 resume 与 v7 显式取消/受控清理生产源码已独立局部 PASS：停止后校验完整归属集合并可重放清理，普通 ack 不删材料。FGS启动后撤权修复已独立局部PASS，最新93项JVM、静态分析与debug APK通过，Dart未改沿用前轮独立102项；API37模拟器独立实跑20项SQLite及7项Runtime/Service用例，均零失败/错误/跳过，强杀重开观测窗口新增GET为0。Runtime夹具绕过MethodChannel编解码。完整契约见[架构规范](../../../.trellis/spec/frontend/architecture.md)。完整MethodChannel、API29/30/33/35/36真机矩阵、系统限制组合、目录fsync及用户目录发布仍未验收；非空 release ack 仍拒绝。Repository 和业务 UI 尚未实现。
+**状态：用户已批准实施；领域/AppStore v1、引擎及 FileStorage/完成源显式释放已有局部独立证据，完整 FileStorage PRD 仍 BLOCK/in_progress。** 当前 Plugin commands.sqlite v2、Android execution v8，发布日志分别 publications.sqlite v1/android_publications_v1.db v1。工厂、目录、创建前意图、只读恢复、不覆盖、取消 cleanup→原 cancel 重放及 completed 同事务 ack 详见[文件契约](../../../.trellis/spec/frontend/file-storage.md)。最新57 focused（55桥＋2锁）、macOS5引擎＋9文件真实集成、93 JVM独立--rerun-tasks、analyze通过；22 Android instrumentation本轮仅编译。旧API37 v7的20 SQLite＋7 Runtime（绕过MethodChannel）为历史通过，不证明v8。Apple/SAF现存目标删除和用户目录临时副本回收为功能缺口；Windows缺环境，macOS host12/iOS前轮host15不证明最低10.15/14。Repository、Riverpod、业务UI未实现。用户负责Android实机，不阻塞其他功能。
 
 ### 已确认的生命周期差异
 
@@ -23,9 +23,9 @@ iOS 用户主动在多任务界面强制退出会触发系统取消后台传输�
 - `lib/main.dart` 只有 `MyApp`、`MyHomePage`、`_MyHomePageState`；保留 Flutter 入口和平台工程，替换计数器首页。
 - `test/widget_test.dart` 仍是计数器测试，界面子任务后续替换；领域/DTO 与真实 SQLite 基础测试 48 项通过，另有插件并发、真实 HTTP 与 macOS 集成。`pubspec.yaml` 精确引入 sqlite3 3.5.2、path_provider 2.1.6 和显式 path 9.5.9 插件。
 - 四个平台工程均已存在，不能将“工程存在”当成下载能力已经支持。
-- Android 的 `MainActivity.kt` 接入进程持有的通道；`AndroidEngine` 桥接核验 AppStore 已提交业务确认。新下载/公开 resume 生产链共用通道 → 串行 TransferCoordinator → 当前进程 ServiceLifecycle token → DownloadService → 最多两个 HttpTransfer/ResumeTransfer worker → 独立 SQLite → EngineEvent；同执行一 worker，Activity detach 只解绑监听。原生日志 user_version=7 保留 v1–v6 历史，在 resume_sources、active_branches、retired_workers 之外新增 cancel_cleanups/cancel_cleanup_members。acceptResume 同事务核验真实 session/完整命令/key/head/原生 input/材料归属，冻结历史 source N，保存 queued N+1、不可变接受结果和独立新 worker 授权；仅显式当前 session 用户命令且 Runtime 无 Work 才退休旧未 finished 授权，不伪造 finished。inspect/open/重连/旧 Intent/NULL 未知结果不退休、不联网。Service 保持 exported=false/dataSync/START_NOT_STICKY，实例/token/idle epoch 重验，无自动恢复；Manifest 已声明联网、FGS类型及通知权限，通知请求 UI 未实现，release 仍为 debug 签名。Stop 保持 CANCEL>PAUSE，pause 等待实际退出、force/close与持久终态。恢复每个 GET前/候选登记/proof/staged 回调重验冻结 source、root ref、完整执行键与新 worker/head；一次性请求意图先于实际 Range/If-Range GET，206/强 ETag/Range/总长/长度不安全不创建候选。安全响应后先登记 UUID payload/facts，再排他创建并复制/复验 prefix、追加 suffix，原件及未提交 tail/旧 candidate 不截断删除。onSample 不认证 offset；候选完整 prefix 经双 force 或最终双 close 的认证事务才晋升 active branch，持久 CANCEL 不推进 proof，持久 PAUSE/CANCEL 在 staged 事务仍优先。关闭/Journal失败不能伪报暂停成功。终态补存失败保留本进程冻结入口，原完整 enqueue/resume/pause 显式重发仅补本地提交，无新 GET/copy/candidate；kill 后只承认持久事实。历史终态重放使用该历史 receipt 已提交的派生恢复字段，不受新 branch 污染；其余字段/命令仍精确比较。无安全 proof/强 ETag 或 known total且offset==total 仍 restartRequired，不自动重下或本地发布。非空 ack 仍拒绝材料释放。显式 cancel 先事务保存取消意图和原件/全部候选双文件清单，再 CANCEL 并等真实退出/关闭/终态落库；删除前双向重验 root/命令/候选proof归属及整集合 canonical/UUID/NOFOLLOW，逐成员删除/done 后首次提交 cleanup.result。部分删除/保存失败保留 pending，原完整 cancel 显式重放只补存/清理，不新增 GET；普通/旧 ack 不删除材料，真实关闭失败阻止原 cancel 清理成功。完成回执仍 cancelling/error=null，不代表业务列表已移除。完整私有文件只到 publishing。Service每次交付通过deliver先实际promotion、再独立校验下载授权；系统接受启动后PAUSE/CANCEL/通知撤权不能跳过promotion直接停止，promotion也不复活worker。POST_NOTIFICATIONS并非系统FGS前置，产品仍拒绝无通知权限的传输。promotion失败按acceptsFailure和destroy所属集合报告，旧实例不得失败新实例已claim但尚未ready的任务。独立93项JVM（协议5＋HTTP20＋协调器30＋生命周期12＋恢复23＋清理3）、静态分析及debug APK通过，Dart未改沿用前轮独立102项；20项 SQLite instrumentation 已在 API37 模拟器独立实跑，20个唯一case零失败/错误/跳过，含迁移/回滚、恢复归属与清理；标准runner逐case报结果，后台异常固定归属原case。API37已独立完成7项Runtime/Service设备case：真实Activity detach/重开仍增长，pause后静止、Range/If-Range实际206、cancel删除完整原件/候选双文件；启动接受后PAUSE/CANCEL/真实通知撤权零新增HTTP/材料/字节，等待12秒无FGS超时。外部HTTP恰3次，seedKill仅准备，跨强杀同执行正字节记录可读且重开inspect窗口新增GET为0。脚本integration_test/android_engine_runtime_check.py及/tmp/android-fgs-race-independent/保存证据；夹具绕过MethodChannel编码，完整通道/业务UI、API29/30/33/35/36真机、真实系统限制/平台promotion失败和旧实例设备故障组合、TLS/真实磁盘故障、目录fsync及超过4GiB传输仍未验收。
+- Android 的 `MainActivity.kt` 接入进程持有的通道；`AndroidEngine` 桥接核验 AppStore 已提交业务确认。新下载/公开 resume 生产链共用通道 → 串行 TransferCoordinator → 当前进程 ServiceLifecycle token → DownloadService → 最多两个 HttpTransfer/ResumeTransfer worker → 独立 SQLite → EngineEvent；同执行一 worker，Activity detach 只解绑监听。原生日志当前 user_version=8 保留 v1–v7 历史，既有 resume_sources、active_branches、retired_workers、cancel_cleanups/cancel_cleanup_members 之外新增 completed_sources。acceptResume 同事务核验真实 session/完整命令/key/head/原生 input/材料归属，冻结历史 source N，保存 queued N+1、不可变接受结果和独立新 worker 授权；仅显式当前 session 用户命令且 Runtime 无 Work 才退休旧未 finished 授权，不伪造 finished。inspect/open/重连/旧 Intent/NULL 未知结果不退休、不联网。Service 保持 exported=false/dataSync/START_NOT_STICKY，实例/token/idle epoch 重验，无自动恢复；Manifest 已声明联网、FGS类型及通知权限，通知请求 UI 未实现，release 仍为 debug 签名。Stop 保持 CANCEL>PAUSE，pause 等待实际退出、force/close与持久终态。恢复每个 GET前/候选登记/proof/staged 回调重验冻结 source、root ref、完整执行键与新 worker/head；一次性请求意图先于实际 Range/If-Range GET，206/强 ETag/Range/总长/长度不安全不创建候选。安全响应后先登记 UUID payload/facts，再排他创建并复制/复验 prefix、追加 suffix，原件及未提交 tail/旧 candidate 不截断删除。onSample 不认证 offset；候选完整 prefix 经双 force 或最终双 close 的认证事务才晋升 active branch，持久 CANCEL 不推进 proof，持久 PAUSE/CANCEL 在 staged 事务仍优先。关闭/Journal失败不能伪报暂停成功。终态补存失败保留本进程冻结入口，原完整 enqueue/resume/pause 显式重发仅补本地提交，无新 GET/copy/candidate；kill 后只承认持久事实。历史终态重放使用该历史 receipt 已提交的派生恢复字段，不受新 branch 污染；其余字段/命令仍精确比较。无安全 proof/强 ETag 或 known total且offset==total 仍 restartRequired，不自动重下或本地发布。普通/旧 ack 不删源；当前 completed 的显式 complete: 集合引用释放已接入，精确事务与释放校验见文件契约，不能推广为任意非空引用均可释放。显式 cancel 先事务保存取消意图和原件/全部候选双文件清单，再 CANCEL 并等真实退出/关闭/终态落库；删除前双向重验 root/命令/候选proof归属及整集合 canonical/UUID/NOFOLLOW，逐成员删除/done 后首次提交 cleanup.result。部分删除/保存失败保留 pending，原完整 cancel 显式重放只补存/清理，不新增 GET；普通/旧 ack 不删除材料，真实关闭失败阻止原 cancel 清理成功。完成回执仍 cancelling/error=null，不代表业务列表已移除。完整私有文件只到 publishing。Service每次交付通过deliver先实际promotion、再独立校验下载授权；系统接受启动后PAUSE/CANCEL/通知撤权不能跳过promotion直接停止，promotion也不复活worker。POST_NOTIFICATIONS并非系统FGS前置，产品仍拒绝无通知权限的传输。promotion失败按acceptsFailure和destroy所属集合报告，旧实例不得失败新实例已claim但尚未ready的任务。以下为旧v7/FGS阶段历史证据，不是当前v8设备验收：独立93项JVM（协议5＋HTTP20＋协调器30＋生命周期12＋恢复23＋清理3）、静态分析及debug APK通过，Dart当时未改沿用前轮独立102项；20项 SQLite instrumentation 已在 API37 模拟器独立实跑，20个唯一case零失败/错误/跳过，含迁移/回滚、恢复归属与清理；标准runner逐case报结果，后台异常固定归属原case。API37已独立完成7项Runtime/Service设备case：真实Activity detach/重开仍增长，pause后静止、Range/If-Range实际206、cancel删除完整原件/候选双文件；启动接受后PAUSE/CANCEL/真实通知撤权零新增HTTP/材料/字节，等待12秒无FGS超时。外部HTTP恰3次，seedKill仅准备，跨强杀同执行正字节记录可读且重开inspect窗口新增GET为0。脚本integration_test/android_engine_runtime_check.py及/tmp/android-fgs-race-independent/保存证据；夹具绕过MethodChannel编码，完整通道/业务UI、API29/30/33/35/36真机、真实系统限制/平台promotion失败和旧实例设备故障组合、TLS/真实磁盘故障、目录fsync及超过4GiB传输仍未验收。
 - `ios/Runner/Info.plist` 是基础配置，需要核对后台会话交付、明文 HTTP 策略、签名及目录授权。
-- macOS DebugProfile/Release entitlements 已启用 sandbox 并新增客户端联网；用户下载目录/持久授权仍未实现，不能只验证 debug。
+- macOS DebugProfile/Release entitlements 已接入 sandbox、客户端联网、下载目录及用户选择目录权限；原生目录/bookmark 接线已实现，跨重启/撤权及最低版本仍未完整验收，不能只验证 debug。
 - `windows/CMakeLists.txt` 保留现有 Flutter 原生资产打包方式，后续核验 SQLite 和插件二进制是否进入 release 包。
 - 不手写 GeneratedPluginRegistrant、generated_plugins 等生成文件；允许 Flutter 随依赖解析刷新产物。插件子任务已把 iOS 部署目标由 13 调至既定 14，但当前 Xcode 不支持该最低目标；临时 macOS12/iOS15 host override 的成功编译不等同于仓库 macOS10.15/iOS14 通过。
 
@@ -79,7 +79,7 @@ flowchart TD
 
 ### 依赖与系统基线
 
-本地环境为 Flutter 3.44.8 / Dart 3.12.2，Android 默认 compileSdk/targetSdk 为 36。sqlite3、path_provider 与固定插件均已解析；Riverpod、目录选择等尚待引入。当前 macOS 有真实运行证据，四平台与最低系统版本未验收。
+本地为 Flutter 3.44.8 / Dart 3.12.2，Android compileSdk/targetSdk 36。sqlite3、path_provider、固定插件已解析；原生目录选择已实现，没有新增 file_selector 依赖，Riverpod 仍待引入。macOS 有真实运行证据，四平台及最低版本未验收。
 
 | 依赖 | 候选版本 | 用途 |
 | --- | --- | --- |
@@ -87,7 +87,7 @@ flowchart TD
 | background_downloader | 9.5.9 + 本仓库有限补丁（已接入，平台未验收） | iOS 和桌面下载适配；固定来源，Android 不向此插件提交任务 |
 | sqlite3 | 3.5.2（已精确锁定） | 四个平台共享 AppStore；当前 macOS 主机真实 SQLite 测试通过，其他平台原生资产待验证 |
 | path_provider | 2.1.6（已精确锁定） | 应用持久目录及平台下载目录定位；真实平台通道及授权待验证 |
-| file_selector | 1.1.0 | 桌面系统目录选择；不假定它自动解决移动端持久授权或 macOS bookmark |
+| file_selector | 1.1.0（原候选，未引入） | 当前使用原生目录选择通道及平台授权，不假定选择器自动提供持久授权 |
 
 background_downloader 9.6.x 要求更高 SDK，本稿不以升级 SDK 为前置条件。9.5.9 原版仅是补丁基线，不能在 pubspec 中直接锁原版后声称契约已满足；实施时记录补丁源码提交。sqlite3 原候选 3.8.0 的实际解析因 hooks → record_use 要求 meta ^1.19.0，与当前 Flutter 固定 meta 1.18.0 冲突，已改为精确 3.5.2；不使用 dependency_overrides，不升级 SDK。Riverpod 等仍需实际解析和四平台 release 构建验证。
 
@@ -127,7 +127,7 @@ third_party/background_downloader/    # 已引入固定 9.5.9 源码及有限补
 
 ### 1. Scope / Trigger
 
-跨越四个平台、数据库、后台执行和文件系统，必须明确命令确认、状态来源、持久化边界和部分失败。DownloadEngine、FileStorage 接口与 DTO 已定义；PluginEngine 经桌面局部复核，AndroidEngine 的 Dart 桥接、新下载与 v6 公开 resume 生产链已通过主机局部独立检查，真实设备仍未验收。v7 显式取消清理已获主机局部 PASS；发布完成/确认重下的非空 release ack、用户目录适配和 Repository/Controller 待实现。已有入口见[持久化契约](../../../.trellis/spec/frontend/persistence.md)、[Android执行契约](../../../.trellis/spec/frontend/architecture.md)与[插件执行契约](../../../.trellis/spec/frontend/plugin-engine.md)。
+跨越平台、数据库、执行及文件系统，必须明确命令确认和部分失败。DownloadEngine/FileStorage DTO及适配已有生产实现；Repository/Controller仍待接入。Android v7取消/FGS为历史局部PASS，当前v8 completed释放、Plugin v2及用户目录发布已有局部证据，完整平台验收未闭环。已有入口见[持久化契约](../../../.trellis/spec/frontend/persistence.md)、[Android执行契约](../../../.trellis/spec/frontend/architecture.md)、[插件契约](../../../.trellis/spec/frontend/plugin-engine.md)、[文件契约](../../../.trellis/spec/frontend/file-storage.md)。
 
 ### 2. Signatures
 
@@ -202,6 +202,7 @@ EngineSnapshot 返回当前 ownerSessionId、当前会话事件序号及活动�
 3. Repository 按执行键和 receiptVersion 去重，在同一 AppStore 事务保存业务快照及 engine_receipt_acks 高水位，再调用 acknowledge。重复交付不会重复发布、导入任务或恢复传输；版本较旧只确认已经提交的结果。
 4. AppStore 写入失败不确认，下一次 inspect 重放；确认失败保留业务提交和待确认行，下次重发同一确认，不回滚真实状态或重提下载。取消/删除事务移除任务时仍保留确认行，避免丢失最后一次确认。
 5. acknowledge 可幂等回收指定版本及更旧的回执，不能删除较新版本、活动快照或暂停/失败仍引用的恢复材料。releaseResumeRefs 必须在业务已持久决定取消、确认从零重下或完成发布后明确列出，并经引擎核对执行归属；普通暂停/失败确认总是空列表。
+   当前 completed 释放精确顺序：同一 AppStore commitReceipt 事务保存业务 completed、完整 EngineReceipt、最终 FileLocation、published PublishOperation 与完整 ReceiptAck，再显式 acknowledge。complete: opaque 引用由 resumeRef 承载，resumeSupport=unsupported 不表示可续传；普通/旧 ack 不删源。引擎核对登记集合/当前完整执行身份/无活动写入，整集合普通文件或登记缺失校验，异步等待后、逐成员前及最终 ack 前重核业务授权，intent→delete/done→ack 失败重开重放。用户目标/临时副本与 iOS opaque 系统材料不纳入私有源集合，详见文件契约。
 6. 补丁禁止 `.failed` 等终态自动清理仍被引用的恢复材料；`autoCleanDatabase:false` 只关闭插件清库策略，不能代替上述确认协议。进度可合并为最新检查点，暂停、终态与发布意图不可仅留在异步事件队列。
 
 - AppStore 写入后才 enqueue；engineId 预先保存，同一执行键和 commandId 幂等。结果丢失通过 inspect 查找，不自动造新任务。
@@ -418,21 +419,23 @@ DirectoryLocation 的 systemDownloads 在 Android 映射到公共 `Download/Down
 1. 完整下载保留在持久暂存。执行该次发布的日志写入方先提交 PublishOperation：随机 operationId、执行键、源文件/长度、固化目录、唯一暂存名称和 phase=prepared；写入失败不触碰目标。Android 在原生日志登记，iOS/桌面在补丁日志登记，AppStore 只镜像，不成为第二个发布者。
 2. 进入 creating 阶段前再次提交，之后只在已授权的父目录以 operationId 对应的唯一暂存名称新建。保存实际句柄/身份后进入 copying；目标中的临时内容可能可见，但状态仍为 publishing。尚未保存句柄就终止时，恢复先精确核对该操作，不重新分配第二个目标，也不按普通文件名猜测归属。
 3. 复制、关闭并校验完整性，保留私有完整暂存。最终名称冲突追加递增序号，已有文件保留；提交 finalizing、候选名称和已知身份后，以不会覆盖既有目标的操作最终发布。跨卷必须先复制到目标卷的已登记临时项；禁止先 exists 再用覆盖写或覆盖改名。
-4. 最终句柄、实际名称和身份核对后提交 published 回执，AppStore 对齐为 completed，才清理私有暂存。进程在最终操作完成但回执未保存时，也必须先按该操作核对，不能凭目标存在就认定成功。
+4. 最终句柄、实际名称和身份核对后提交 published 完整回执；AppStore 同事务保存 completed、最终 FileLocation、published PublishOperation 与显式完整 ReceiptAck 后才 acknowledge 释放私有源。publish 返回或普通 ack 均不能删源。最终操作完成但 identity 未保存时 uncertain，不凭目标存在认定成功；identity已保存而回执失败时显式本地重放补存。
 5. recoverPublication 只查询并返回 notCreated/staged/published/needsPermission/uncertain。确定 staged 时复用原目标继续本地发布；确定 published 时补写业务状态；只有已证明未创建且旧调用不可能继续时才允许同操作新建。uncertain 或授权丢失时保留操作、完整暂存和错误，等待核实/重新授权，不自动再创建或删除文件。
 
 平台恢复边界：
 
 | 目标 | 创建/最终发布前登记 | 创建成功但句柄未保存时 | 最终操作成功但回执未保存时 |
 | --- | --- | --- | --- |
-| 桌面本地目录、iOS 应用内目录 | 父目录身份、operationId 暂存名、源长度；最终阶段另记候选名和文件身份 | 精确查找已登记父目录中的操作临时项；核对操作归属并取得文件身份，身份不明不删除 | 比较临时/最终项与已保存文件身份；使用经验证的不覆盖发布能力，不能用普通覆盖式 rename |
-| Android MediaStore | 本应用待发布条目的 RELATIVE_PATH、operationId 唯一 DISPLAY_NAME、预期大小与 pending 状态 | 在可访问的本应用条目中按完整操作标记精确查询；多项、名称被改写或归属不明返回 uncertain | 核对已保存条目 URI/行标识、实际名称与 IS_PENDING；最终更新结果不明先查询该条目，不重复 insert |
-| Android SAF | 授权父文档、operationId 临时名及提供方能力 | 仅在提供方可精确查询并核验该操作归属时取回 URI；返回改名/自动编号导致无法证明归属则 uncertain | renameDocument 可能返回新文档 URI；不得假定旧 URI 总有效，必须能关联旧/新身份，否则保留 uncertain，不按同名文件认领 |
-| Apple 用户选择/文件提供方目录 | security-scoped 父目录 bookmark、operationId 临时名及可验证身份 | 激活授权并协调查询已登记临时项；后台不可访问返回 needsPermission，名称或归属不明返回 uncertain | 解析已保存身份/bookmark 并协调核对；身份不可稳定关联时不猜测完成，不重复发布 |
+| 桌面本地目录、iOS 应用内目录 | 父目录身份、操作定位、源长度、最终候选与已知身份 | 未持久身份则 uncertain，不按名字认领 | Apple 核验源fd→O_EXCL新最终fd，最终identity未知则uncertain；Windows验证源HANDLE→不覆盖FileRenameInfo，仅源码未构建 |
+| Android MediaStore | 本应用 RELATIVE_PATH、候选 DISPLAY_NAME、大小、pending条目 | 未保存可证明身份则 uncertain，不重复 insert | 保存稳定行 URI 并核对；清 pending 结果不明先查询，已公开完整项只补本地阶段 |
+| Android SAF | 持久父授权、候选名称与提供方能力 | URI/fd identity 未知则 uncertain，不补建 | 当前仅系统 ExternalStorageProvider，直接创建最终候选后复制，不走 rename；其他提供方创建前拒绝，现存目标删除安全拒绝 |
+| Apple 用户目录 | bookmark/security scope、操作名、临时/最终独立身份、publishAttempt | 后台失权 needsPermission；未知身份 uncertain | fd/O_EXCL发布；最终创建回复丢失不认领；现存目标删除安全拒绝并保留用户目录临时副本，是功能缺口 |
 
 唯一名称只是定位信息，不单独授权删除；平台适配还须核对创建记录、父目录和文件/提供方身份。创建或改名结果不明而无法核验时，使用 publicationUncertain 保留本次尝试，不宣称自动清理成功。能力已知不足的提供方在设置/发布前返回 directoryUnsupported 并说明原因，保留原设置或已固化目录及完整暂存；不能静默换目录。默认目录必须通过对应平台创建、改名和恢复验证，不能用该错误掩盖必需默认位置不可用。
 
 取消先保存 cancelling、停止并等待写入退出，再恢复核对本任务发布操作，清理确定归属的部分文件/未完成目标。uncertain 项不猜测删除，返回 cleanupFailure 并保留记录、操作和处理指引；只有清理确实完成才移除任务并确认释放材料。删除完成文件同样先保存 deleting；文件不存在可清除记录，身份或授权不符则保留错误。
+
+生产接线：Apple/Windows 使用 platformFileStorage(journal: pluginEngine.publicationJournal)，Android 工厂使用原生执行侧日志；defaultDownloadDirectory 返回平台 DTO，实际目录在原生定位。取消遇待清理发布项时原 cancel 返回 cleanupFailure，cleanupPendingPublication 成功后重放完全相同原命令。执行门→发布门为独立 SQLite BEGIN IMMEDIATE、busy_timeout=0、BUSY/LOCKED 异步等待，禁止同门重入；与 vendor writer.sqlite 的原有版本分配锁不同。具体签名/错误/测试见[文件契约](../../../.trellis/spec/frontend/file-storage.md)。
 
 重新下载使用原链接和原任务固化目录创建新任务，原完成记录和文件保留；来自配置的下载则按配置当前值解析目录。全局默认目录改变不迁移任何现有任务。
 
@@ -553,7 +556,7 @@ iOS 重新打开 → 查询系统任务 → 关联与同步 → 不重复提交
 | P2 Android 执行身份 | 空快照握手、固定 key/commandId/期望版本、拒绝旧身份 | 首次空列表、Activity 重连、旧会话/代次/版本请求 |
 | P2 桌面静默重下 | 明确要求补丁在实际 GET 写入前拒绝不安全恢复 | 返回 200/坏 Range/变化 ETag 时原部分文件不变 |
 
-上表记录原设计审查要求；领域/AppStore 已通过，插件桌面回执、字节及安全恢复现有局部独立证据。用户目标发布、Android 执行与 iOS/Windows/最低目标仍待实施或平台验收，不能把某一桌面修复视为全表闭环。
+上表为原设计审查要求；领域/AppStore、桌面执行及FileStorage/显式私有源释放已有局部独立证据。Apple/SAF正常删除、Android提供方/v8设备、iOS/Windows/最低目标与Repository仍待完成或平台验收，不能视为全表闭环。
 
 ## 调研依据
 
@@ -567,4 +570,4 @@ iOS 重新打开 → 查询系统任务 → 关联与同步 → 不重复提交
 - Android SAF 改名返回 URI 的契约：`https://developer.android.com/reference/android/provider/DocumentsContract#renameDocument(android.content.ContentResolver,android.net.Uri,java.lang.String)`；不能假定旧文档标识总有效。
 - Windows 不覆盖移动能力：`https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexw`；实现不得启用 MOVEFILE_REPLACE_EXISTING，仍需验证目标卷和文件身份恢复。
 
-调研和实施现已覆盖固定归档核验、依赖解析、当前 macOS 的真实 SQLite/下载/恢复及独立复核。macOS release 与 iOS 无签名仅在临时更高 host 目标编译通过，未证明既定 macOS10.15/iOS14；Windows 实机、移动端真机、用户目录发布仍未验收，当前主机结果不等同于四平台全部安全契约成立。
+调研和实施已覆盖固定归档、依赖解析、macOS真实下载/SQLite/发布/completed ack与独立复核。macOS临时host12不证明10.15，iOS前轮host15无签名编译不证明14；Windows缺环境，Android提供方及v8的22设备夹具只编译。用户目录发布已实现局部路径，Apple/SAF正常删除及持久授权等仍未验收；完整FileStorage PRD继续BLOCK/in_progress，用户负责Android实机且不阻塞其他功能。
