@@ -36,3 +36,9 @@ app拥有AppDependencies，组装入口、主题和真实功能依赖；通过`.
 本轮仅文档，复用独立最终analyze exit0、155 Flutter、2真实macOS Plugin集成、1真实UI smoke（GET=1/557056字节paused/SQLite一致）产物，不再跑产品测试。AppDependencies初始化顺序及首异常保留、具体record、三仓库流、独立cancel busy、ref.mounted、PluginEngine固定group单活owner/失败清理/幂等close、macOS CFBoolean与Dart最终重查已同步至正式规范；AppDependencies.close自身未承诺幂等。
 
 保留速度/ETA未知、restartUnsupported、响应文件名/最终URL、Apple/SAF删除及Apple用户目录临时副本缺口；Windows退出未接线，macOS红钮/Quit无实际操作，系统截图黑屏不作通过。host12仅临时目标；Android设备用户负责且本轮运行0，iOS/Windows/最低版本未验收。UI整任务仍BLOCK/in_progress，PRD不勾选，不stage/commit/push/archive。
+
+## macOS 默认构建兼容修复（2026-11-05）
+
+用户直接运行默认 macOS 构建遇到 Xcode 不支持原候选 10.15，授权应用最低版本改为 12.0。Runner 工程项目级 Debug/Profile/Release 三处统一为 12.0，目标继承项目配置，Info.plist 继续引用 MACOSX_DEPLOYMENT_TARGET。xcconfig 无额外部署覆盖；Flutter 自动生成的 Swift Package 同步为 12.0，不手改生成文件、依赖或其他平台。此前 host12 临时覆盖仅为历史局部证据，不能追认为 10.15 已验证。
+
+本轮移除 XCODE_XCCONFIG_FILE 与 MACOSX_DEPLOYMENT_TARGET 环境覆盖，默认 `flutter build macos --debug` exit0；Info.plist LSMinimumSystemVersion 和 Mach-O minos 均为 12.0。日志 `/tmp/download-ui-macos12-build.log`，退出码 `/tmp/download-ui-macos12-build.exit`。当前主机为 macOS 27.0.1；macOS 12 实机、release 和系统退出等原未验收项继续保留，完整任务仍 BLOCK/in_progress。

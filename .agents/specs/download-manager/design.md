@@ -93,7 +93,7 @@ flowchart TD
 
 background_downloader 9.6.x要求更高SDK，本稿不以升级SDK为前置。9.5.9原版仅是补丁基线，固定源码及来源见插件规范，不能锁原版后声称契约满足。sqlite3原候选3.8.0因hooks→record_use要求meta ^1.19.0与当前Flutter固定meta 1.18.0冲突，实际精确3.5.2；无dependency_overrides/SDK升级。Riverpod已解析，四平台release及最低版本仍需验证。
 
-建议基线：Android 10/API 29+（简化公共下载目录）、iOS 14+（9.5.9 podspec 下限）、macOS 10.15+、Windows 10/11 64 位。它们是本稿待审核的支持基线，不是已完成兼容性认证；最终以 Flutter、传递依赖及设备验证后的共同下限为准。
+当前 macOS 应用最低部署版本为 12.0：按用户兼容修复授权，将工程 Debug/Profile/Release 从原候选 10.15 统一为 12.0，以适配当前 Xcode 支持范围；不升级 SDK 或依赖。已在当前 macOS 主机移除 XCODE_XCCONFIG_FILE 与 MACOSX_DEPLOYMENT_TARGET 环境覆盖后，正常 `flutter build macos --debug` exit0；产物 Info.plist 与 Mach-O minos 均为 12.0，日志 `/tmp/download-ui-macos12-build.log`。这是当前默认构建证据，不是 macOS 12 实机或 release 验收；此前临时 host12 结果仍只是历史证据，不证明 10.15。Android 10/API 29+、iOS 14+、Windows 10/11 64 位仍为原待验证基线。
 
 ### 目录与界面
 

@@ -46,3 +46,12 @@ fake 数据仅用于隔离 Widget 测试，不冒充可运行业务。依赖或�
 - [x] 保留独立局部PASS与整体BLOCK/in_progress边界，PRD未勾选；复用`/tmp/download-ui-check-final-{analyze,test,plugin,smoke}.exit`全0，不重跑产品测试。
 
 本轮文档校验及受保护文件哈希比对结果随外部交付报告提供；未修改产品代码/配置/依赖、PRD、task.json、requirements、review、.pi、docs或其他任务，未stage/commit/push/archive。
+
+## macOS 默认部署基线修复（2026-11-05）
+
+- [x] 检查应用工程三配置、xcconfig、Info.plist 和当前 macOS 依赖/Flutter Swift Package；应用部署版本统一 12.0，生成 Package 由 Flutter 自动同步，不改依赖及其他平台。
+- [x] 移除 XCODE_XCCONFIG_FILE 与 MACOSX_DEPLOYMENT_TARGET 环境覆盖后执行 `flutter build macos --debug`，exit0；`/tmp/download-ui-macos12-build.log` 与 `.exit` 保留证据。产物 LSMinimumSystemVersion/minos 均为 12.0。
+- [x] 同步任务设计、正式 frontend 入口和源设计当前基线；历史临时 host12 和 10.15 未验证记录原样保留。配置修复无需新增镜像测试。
+- [ ] macOS 12 实机、release、系统 close/Quit 和其他平台验收仍未完成；PRD/task.json 不变，不 stage/commit/push/archive。
+
+独立部署核查：项目级 Debug/Profile/Release 均为 12.0；Runner、RunnerTests 与 Flutter Assemble 无目标级部署覆盖，xcconfig 链无额外部署值。清除 XCODE_XCCONFIG_FILE/MACOSX_DEPLOYMENT_TARGET 后，分别只读执行三配置 Runner 的 xcodebuild -showBuildSettings，均 exit0 且有效值 12.0。复核既有默认 debug 构建日志与 .exit=0；实际 downloader.app 的 LSMinimumSystemVersion=12.0、主 Mach-O LC_BUILD_VERSION minos=12.0。五文件差异仅调整当前基线并补充证据，历史 host12/10.15 未验证结论保留；无阻断缺陷。不重跑构建或 Dart 测试，Profile/Release 仅核查配置，不计构建/运行通过。

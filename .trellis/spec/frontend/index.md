@@ -37,3 +37,7 @@ Riverpod 3.4.3、Provider、中文业务 UI 和 AppDependencies 已接入，见[
 - 发布前先登记操作，结果不明不重复新建或猜测删除；目录快照、续传确认、清理和删除选择符合需求。
 - 业务模型不依赖 Flutter、Riverpod 或插件类型；没有只有转发作用的 UseCase。
 - 代码变更执行 `flutter analyze`、相关 `flutter test`；平台集成分别在 Android、macOS、Windows 验证，并在纳入 iOS 时完成其真机检查。文档变更检查链接、内容一致性和示例边界。
+
+## 当前 macOS 部署基线
+
+应用 macOS 最低部署版本现为 **12.0**，Runner 项目 Debug/Profile/Release 统一继承该基线；Flutter 生成的 Swift Package 随正常构建同步，不手工修改生成配置或依赖下限。用户授权修复原候选 10.15 与当前 Xcode 不兼容的问题后，已移除 XCODE_XCCONFIG_FILE 和 MACOSX_DEPLOYMENT_TARGET 环境覆盖执行 `flutter build macos --debug`，exit0，日志 `/tmp/download-ui-macos12-build.log`；Info.plist 最低版本及 Mach-O minos 均为 12.0。历史临时 host12 证据仍不证明 10.15；本轮默认构建通过也不代表 macOS 12 实机、release 或四平台验收。
