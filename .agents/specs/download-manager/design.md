@@ -20,7 +20,7 @@ iOS 用户主动在多任务界面强制退出会触发系统取消后台传输�
 
 ### 当前代码与改动范围
 
-- `lib/main.dart` 已改为ensureInitialized后runApp(MyApp)，导出app入口；MyApp在应用级初始化完成后注入真实依赖，错误页提供显式retry，不再使用计数器首页。
+- `lib/main.dart` 已改为ensureInitialized后runApp(DownloaderApp)，导出app入口；DownloaderApp在应用级初始化完成后注入真实依赖，错误页提供显式retry，不再使用计数器首页。
 - `test/widget_test.dart` 已替换为业务Widget/Provider回归；真实集成另见integration_test/download_ui_test.dart及plugin_engine_test.dart。依赖实际解析flutter_riverpod 3.4.3，sqlite3 3.5.2、path_provider 2.1.6和固定path 9.5.9插件不变。
 - 四个平台工程均已存在，不能将“工程存在”当成下载能力已经支持。
 - Android 的 `MainActivity.kt` 接入进程持有的通道；`AndroidEngine` 桥接核验 AppStore 已提交业务确认。新下载/公开 resume 生产链共用通道 → 串行 TransferCoordinator → 当前进程 ServiceLifecycle token → DownloadService → 最多两个 HttpTransfer/ResumeTransfer worker → 独立 SQLite → EngineEvent；同执行一 worker，Activity detach 只解绑监听。原生日志当前 user_version=8 保留 v1–v7 历史，既有 resume_sources、active_branches、retired_workers、cancel_cleanups/cancel_cleanup_members 之外新增 completed_sources。acceptResume 同事务核验真实 session/完整命令/key/head/原生 input/材料归属，冻结历史 source N，保存 queued N+1、不可变接受结果和独立新 worker 授权；仅显式当前 session 用户命令且 Runtime 无 Work 才退休旧未 finished 授权，不伪造 finished。inspect/open/重连/旧 Intent/NULL 未知结果不退休、不联网。Service 保持 exported=false/dataSync/START_NOT_STICKY，实例/token/idle epoch 重验，无自动恢复；Manifest 已声明联网、FGS类型及通知权限，通知请求 UI 未实现，release 仍为 debug 签名。Stop 保持 CANCEL>PAUSE，pause 等待实际退出、force/close与持久终态。恢复每个 GET前/候选登记/proof/staged 回调重验冻结 source、root ref、完整执行键与新 worker/head；一次性请求意图先于实际 Range/If-Range GET，206/强 ETag/Range/总长/长度不安全不创建候选。安全响应后先登记 UUID payload/facts，再排他创建并复制/复验 prefix、追加 suffix，原件及未提交 tail/旧 candidate 不截断删除。onSample 不认证 offset；候选完整 prefix 经双 force 或最终双 close 的认证事务才晋升 active branch，持久 CANCEL 不推进 proof，持久 PAUSE/CANCEL 在 staged 事务仍优先。关闭/Journal失败不能伪报暂停成功。终态补存失败保留本进程冻结入口，原完整 enqueue/resume/pause 显式重发仅补本地提交，无新 GET/copy/candidate；kill 后只承认持久事实。历史终态重放使用该历史 receipt 已提交的派生恢复字段，不受新 branch 污染；其余字段/命令仍精确比较。无安全 proof/强 ETag 或 known total且offset==total 仍 restartRequired，不自动重下或本地发布。普通/旧 ack 不删源；当前 completed 的显式 complete: 集合引用释放已接入，精确事务与释放校验见文件契约，不能推广为任意非空引用均可释放。显式 cancel 先事务保存取消意图和原件/全部候选双文件清单，再 CANCEL 并等真实退出/关闭/终态落库；删除前双向重验 root/命令/候选proof归属及整集合 canonical/UUID/NOFOLLOW，逐成员删除/done 后首次提交 cleanup.result。部分删除/保存失败保留 pending，原完整 cancel 显式重放只补存/清理，不新增 GET；普通/旧 ack 不删除材料，真实关闭失败阻止原 cancel 清理成功。完成回执仍 cancelling/error=null，不代表业务列表已移除。完整私有文件只到 publishing。Service每次交付通过deliver先实际promotion、再独立校验下载授权；系统接受启动后PAUSE/CANCEL/通知撤权不能跳过promotion直接停止，promotion也不复活worker。POST_NOTIFICATIONS并非系统FGS前置，产品仍拒绝无通知权限的传输。promotion失败按acceptsFailure和destroy所属集合报告，旧实例不得失败新实例已claim但尚未ready的任务。以下为旧v7/FGS阶段历史证据，不是当前v8设备验收：独立93项JVM（协议5＋HTTP20＋协调器30＋生命周期12＋恢复23＋清理3）、静态分析及debug APK通过，Dart当时未改沿用前轮独立102项；20项 SQLite instrumentation 已在 API37 模拟器独立实跑，20个唯一case零失败/错误/跳过，含迁移/回滚、恢复归属与清理；标准runner逐case报结果，后台异常固定归属原case。API37已独立完成7项Runtime/Service设备case：真实Activity detach/重开仍增长，pause后静止、Range/If-Range实际206、cancel删除完整原件/候选双文件；启动接受后PAUSE/CANCEL/真实通知撤权零新增HTTP/材料/字节，等待12秒无FGS超时。外部HTTP恰3次，seedKill仅准备，跨强杀同执行正字节记录可读且重开inspect窗口新增GET为0。脚本integration_test/android_engine_runtime_check.py及/tmp/android-fgs-race-independent/保存证据；夹具绕过MethodChannel编码，完整通道/业务UI、API29/30/33/35/36真机、真实系统限制/平台promotion失败和旧实例设备故障组合、TLS/真实磁盘故障、目录fsync及超过4GiB传输仍未验收。
@@ -100,7 +100,7 @@ background_downloader 9.6.x要求更高SDK，本稿不以升级SDK为前置。9.
 ```text
 lib/
   main.dart
-  app/                              # MyApp、主题、依赖组装
+  app/                              # DownloaderApp、主题、依赖组装
   features/
     downloads/
       presentation/                 # 页面、DownloadsController、弹窗

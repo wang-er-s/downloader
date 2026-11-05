@@ -48,7 +48,7 @@ Future<AppExitResponse> requestExit();
 
 ## 3. Contracts
 
-- main先ensureInitialized，再runApp(MyApp)。MyApp.initialize默认AppDependencies.open；FutureBuilder提供加载、初始化错误与显式重试，失败不自动循环、删库或显示伪空集合。同步抛错经Future.sync捕获，retry Future提前挂错误监听，避免下一帧前未处理错误。
+- main先ensureInitialized，再runApp(DownloaderApp)。DownloaderApp.initialize默认AppDependencies.open；FutureBuilder提供加载、初始化错误与显式重试，失败不自动循环、删库或显示伪空集合。同步抛错经Future.sync捕获，retry Future提前挂错误监听，避免下一帧前未处理错误。
 - AppDependencies.open顺序：AppStore.openPersistent（四表v2）→ AndroidEngine.open(store:)或PluginEngine.open(store:) → platformFileStorage（Plugin路径注入engine.publicationJournal）→ SettingsRepository(defaultDownloadDirectory()) → application-support/staging_v1 → DownloadRepository.initialize → SavedDownloadRepository。失败对已取得settings、engine、store分别尽力释放，保留初始化首异常；PluginEngine内部失败清理及幂等close见插件规范。
 - app将`.presentation`命名record通过ProviderScope override注入；feature只依赖具体Repository/FileStorage类型，禁止import app/dependencies.dart或重建应用依赖。页面销毁只退订/释放界面资源，不取消任务或关闭Engine/Store。AppDependencies.close为应用所有者入口，不保证其本身重复调用幂等。
 - 三个仓库流是业务显示唯一数据源：tasks来自watchTasks、saved来自watchSavedDownloads、settings来自watchSettings。分类/数量由流派生；完成须为已发布completed，paused/failed/waitingRecovery/publishing仍属下载中。Notifier不存任务/配置/主题副本，不直接读SQL、插件或订阅Engine事件。输入、当前分类、导航留Widget。

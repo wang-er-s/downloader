@@ -169,7 +169,7 @@ void main() {
     (tester) async {
       var attempts = 0;
       await tester.pumpWidget(
-        MyApp(
+        DownloaderApp(
           initialize: () async {
             attempts++;
             throw StateError('disk');

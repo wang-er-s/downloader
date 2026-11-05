@@ -9,14 +9,14 @@ import '../features/downloads/presentation/downloads_page.dart';
 import '../features/settings/domain/app_settings.dart';
 import '../features/settings/presentation/settings_page.dart';
 
-class MyApp extends StatefulWidget {
-  const MyApp({super.key, this.initialize = AppDependencies.open});
+class DownloaderApp extends StatefulWidget {
+  const DownloaderApp({super.key, this.initialize = AppDependencies.open});
   final Future<AppDependencies> Function() initialize;
   @override
-  State<MyApp> createState() => _MyAppState();
+  State<DownloaderApp> createState() => _DownloaderAppState();
 }
 
-class _MyAppState extends State<MyApp> {
+class _DownloaderAppState extends State<DownloaderApp> {
   late Future<AppDependencies> opening = initialize();
   Future<AppDependencies> initialize() {
     final next = Future<AppDependencies>.sync(widget.initialize);
