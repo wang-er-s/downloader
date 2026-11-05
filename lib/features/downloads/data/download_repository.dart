@@ -133,12 +133,22 @@ final class DownloadRepository {
     return task;
   }
 
-  DownloadTask _copy(DownloadTask task, Map<String, Object?> changes) =>
-      DownloadTask.fromJson({
-        ...task.toJson(),
-        ...changes,
-        'updatedAt': DateTime.now().toUtc().millisecondsSinceEpoch,
-      });
+  DownloadTask _copy(DownloadTask task, Map<String, Object?> changes) {
+    final now = DateTime.now().toUtc().millisecondsSinceEpoch;
+    return DownloadTask.fromJson({
+      ...task.toJson(),
+      ...changes,
+      'updatedAt': now,
+      'completedAt':
+          task.completedAt?.millisecondsSinceEpoch ??
+          (task.status == DownloadStatus.completed
+              ? task.updatedAt.millisecondsSinceEpoch
+              : changes['status'] == 'completed'
+              ? now
+              : null),
+    });
+  }
+
   void _save(DownloadTask task) {
     repositoryStore(
       () => store.transaction((tx) {
@@ -187,15 +197,8 @@ final class DownloadRepository {
     );
   }
 
-  String _displayName(CreateDownload input, String id) {
-    if (input.fileName != null) return input.fileName!;
-    try {
-      final name = Uri.parse(input.url).pathSegments.last;
-      return validateFileName(name);
-    } catch (_) {
-      return 'download_$id';
-    }
-  }
+  String _displayName(CreateDownload input, String id) =>
+      input.fileName ?? downloadFileName(input.url, 'download_$id');
 
   void _event(EngineEvent event) {
     if (_inspecting || _session == null) {

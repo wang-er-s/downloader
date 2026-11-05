@@ -2,7 +2,7 @@
 
 ## 1. Scope / Trigger
 
-三个生产 Repository 已有局部独立 PASS，协调 [AppStore v2](persistence.md)、[引擎](plugin-engine.md)及[文件发布](file-storage.md)。[源设计](../../../.agents/specs/download-manager/design.md)仍有未交付部分，PRD 不勾选、不归档。
+三个生产 Repository 已有局部独立 PASS，协调 [AppStore v3](persistence.md)、[引擎](plugin-engine.md)及[文件发布](file-storage.md)。[源设计](../../../.agents/specs/download-manager/design.md)仍有未交付部分，PRD 不勾选、不归档。
 
 ## 2. Signatures
 
@@ -50,7 +50,7 @@ Future<void> close();
 - commitReceipt 同事务提交业务状态、完整回执和完整 ack，COMMIT 后更新快照及通知，避免同步订阅者重入取消被旧完成覆盖。真实已停但保存失败仍可通过流反映，操作报告 persistenceFailure，不能以普通 saveTask 绕过事务。
 - ack 失败保留已提交授权。deleteCompleted 先重放已提交完整 ack 并等待成功，再 deleting/可选文件删除/删行；失败保持 completed 授权。确认行不级联删除，同版本非空 ack 不得改为空。
 - 启动零自动传输：Android/桌面旧活动项 waitingRecovery；iOS 只关联既有系统任务。仅 inspect、确认重放及 recoverPublication 只读核对，不自动 enqueue/resume/publish/cleanup；retryPublication 是显式本地重试，uncertain 不再建目标。
-- 缓存 save/delete 不下载、不级联，start 复制配置调用 create，空目录取发起时最新默认值。设置仅无记录时保存 system 主题/defaultDirectory；setDefaultDirectory 校验平台一致后持久化，保存失败保留旧值，历史任务目录不迁移。仓库不探测授权/可写性，也不持有 FileStorage；UI Controller 已通过注入的 FileStorage.pickDirectory 选择目录，null 保留旧值，选择或设置成功不等于全部持久授权组合已验收。
+- 缓存显示名与下载任务命名共享 downloadFileName(URL, fallback)，取解码后的最后路径段并校验，非法/空段用 download_<id>；手填名优先，不把显示推导结果写回原配置。缓存 save/delete 不下载、不级联，start 复制配置调用 create，空目录取发起时最新默认值。设置仅无记录时保存 system 主题/defaultDirectory；setDefaultDirectory 校验平台一致后持久化，保存失败保留旧值，历史任务目录不迁移。仓库不探测授权/可写性，也不持有 FileStorage；UI Controller 已通过注入的 FileStorage.pickDirectory 选择目录，null 保留旧值，选择或设置成功不等于全部持久授权组合已验收。
 - app 将具体三个 Repository 与 FileStorage 组成 presentation record 注入，feature 不依赖 app。tasksProvider/savedProvider/settingsProvider 各订阅对应业务流，分类/数量由流派生；Notifier 只存 busy/error，不直接访问SQL/引擎。独立 cancel busy 和 mounted 生命周期见[UI 契约](ui.md)。
 
 ## 4. Validation & Error Matrix

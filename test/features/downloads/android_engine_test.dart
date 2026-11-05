@@ -13,6 +13,7 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   const methods = MethodChannel('downloader/android_engine');
   const events = MethodChannel('downloader/android_engine/events');
+  const permissions = MethodChannel('downloader/permissions');
   final messenger =
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
   late AppStore store;
@@ -128,6 +129,7 @@ void main() {
     calls = [];
     eventCalls = [];
     respond = (call) => call.method == 'inspect' ? snapshot() : null;
+    messenger.setMockMethodCallHandler(permissions, (_) async => true);
     messenger.setMockMethodCallHandler(methods, (call) async {
       calls.add(call);
       return respond(call);
@@ -144,7 +146,67 @@ void main() {
     store.close();
     messenger.setMockMethodCallHandler(methods, null);
     messenger.setMockMethodCallHandler(events, null);
+    messenger.setMockMethodCallHandler(permissions, null);
   });
+
+  for (final method in ['enqueue', 'resume']) {
+    test(
+      '$method waits for notification permission before native execution',
+      () async {
+        final permission = Completer<bool>();
+        final requested = Completer<void>();
+        messenger.setMockMethodCallHandler(permissions, (call) {
+          expect(call.method, 'requestNotifications');
+          requested.complete();
+          return permission.future;
+        });
+        final pending = method == 'enqueue'
+            ? engine.enqueue(f.command, input)
+            : engine.resume(f.command);
+        await requested.future;
+        expect(calls, isEmpty);
+        permission.complete(true);
+        await pending;
+        expect(calls.single.method, method);
+      },
+    );
+
+    for (final granted in [false, null]) {
+      test('$method does not execute when permission is $granted', () async {
+        messenger.setMockMethodCallHandler(permissions, (_) async => granted);
+        await expectLater(
+          method == 'enqueue'
+              ? engine.enqueue(f.command, input)
+              : engine.resume(f.command),
+          throwsA(failure(FailureCode.permissionDenied)),
+        );
+        expect(calls, isEmpty);
+        expect(store.readTasks(), isEmpty);
+      });
+    }
+  }
+
+  test(
+    'closing while notification permission is pending prevents execution',
+    () async {
+      final permission = Completer<bool>();
+      final requested = Completer<void>();
+      messenger.setMockMethodCallHandler(permissions, (_) {
+        requested.complete();
+        return permission.future;
+      });
+      final pending = engine.enqueue(f.command, input);
+      final rejected = expectLater(
+        pending,
+        throwsA(failure(FailureCode.stateConflict, 'closed')),
+      );
+      await requested.future;
+      await engine.close();
+      permission.complete(true);
+      await rejected;
+      expect(calls, isEmpty);
+    },
+  );
 
   test(
     'open/listen/close/reconnect never transfer; listen has version',
@@ -357,19 +419,60 @@ void main() {
       expect(calls, isEmpty);
     },
   );
-  test('completed release uses exact AppStore transaction and refuses path authorization', () async {
-    final operation = PublishOperation.fromJson({...f.publication.toJson(), 'phase': 'published', 'targetRef': f.location.locator, 'identity': f.location.identity});
-    final receipt = EngineReceipt.fromJson({...f.receipt().toJson(), 'state': 'completed', 'resumeRef': 'complete:opaque', 'publishedLocation': f.location.toJson(), 'publishOperation': operation.toJson()});
-    final release = ReceiptAck(key: f.key, receiptVersion: 1, releaseResumeRefs: ['complete:opaque']);
-    final task = DownloadTask.fromJson({...f.task().toJson(), 'status': 'completed', 'engineReceipt': receipt.toJson(), 'fileLocation': f.location.toJson(), 'publishOperation': operation.toJson()});
-    store.transaction((tx) { tx.saveTask(f.task()); expect(tx.commitReceipt(task, release), isTrue); });
-    respond = (call) => call.method == 'inspect' ? snapshot(receipts: [receipt]) : null;
-    await expectLater(engine.acknowledge(ReceiptAck(key: f.key, receiptVersion: 1, releaseResumeRefs: [f.location.locator])), throwsA(failure(FailureCode.stateConflict, 'uncommittedAcknowledgement')));
-    expect(calls, isEmpty);
-    await engine.acknowledge(release);
-    expect(calls.map((call) => call.method), ['inspect', 'acknowledge']);
-    expect((calls.last.arguments as Map)['releaseResumeRefs'], ['complete:opaque']);
-  });
+  test(
+    'completed release uses exact AppStore transaction and refuses path authorization',
+    () async {
+      final operation = PublishOperation.fromJson({
+        ...f.publication.toJson(),
+        'phase': 'published',
+        'targetRef': f.location.locator,
+        'identity': f.location.identity,
+      });
+      final receipt = EngineReceipt.fromJson({
+        ...f.receipt().toJson(),
+        'state': 'completed',
+        'resumeRef': 'complete:opaque',
+        'publishedLocation': f.location.toJson(),
+        'publishOperation': operation.toJson(),
+      });
+      final release = ReceiptAck(
+        key: f.key,
+        receiptVersion: 1,
+        releaseResumeRefs: ['complete:opaque'],
+      );
+      final task = DownloadTask.fromJson({
+        ...f.task().toJson(),
+        'status': 'completed',
+        'engineReceipt': receipt.toJson(),
+        'fileLocation': f.location.toJson(),
+        'publishOperation': operation.toJson(),
+      });
+      store.transaction((tx) {
+        tx.saveTask(f.task());
+        expect(tx.commitReceipt(task, release), isTrue);
+      });
+      respond = (call) =>
+          call.method == 'inspect' ? snapshot(receipts: [receipt]) : null;
+      await expectLater(
+        engine.acknowledge(
+          ReceiptAck(
+            key: f.key,
+            receiptVersion: 1,
+            releaseResumeRefs: [f.location.locator],
+          ),
+        ),
+        throwsA(
+          failure(FailureCode.stateConflict, 'uncommittedAcknowledgement'),
+        ),
+      );
+      expect(calls, isEmpty);
+      await engine.acknowledge(release);
+      expect(calls.map((call) => call.method), ['inspect', 'acknowledge']);
+      expect((calls.last.arguments as Map)['releaseResumeRefs'], [
+        'complete:opaque',
+      ]);
+    },
+  );
 
   test(
     'committed receipt matches entire native payload before flat ack',
@@ -464,9 +567,7 @@ void main() {
       );
       await expectLater(
         engine.acknowledge(release),
-        throwsA(
-          failure(FailureCode.stateConflict, 'uncommittedReceipt'),
-        ),
+        throwsA(failure(FailureCode.stateConflict, 'uncommittedReceipt')),
       );
       expect(calls, isEmpty);
       expect(store.readAcknowledgements().single.toJson(), release.toJson());

@@ -19,7 +19,7 @@ final class AppStore {
           .single
           .values
           .single;
-      if (version != 0 && version != 1 && version != 2) {
+      if (version != 0 && version != 1 && version != 2 && version != 3) {
         invalid(FailureCode.protocolMismatch);
       }
       database.execute('BEGIN IMMEDIATE');
@@ -30,6 +30,15 @@ final class AppStore {
             'ALTER TABLE download_tasks ADD COLUMN create_input_json TEXT',
           );
           database.execute('PRAGMA user_version = 2');
+        }
+        if (version == 0 || version == 1 || version == 2) {
+          database.execute(
+            'ALTER TABLE download_tasks ADD COLUMN completed_at INTEGER',
+          );
+          database.execute(
+            "UPDATE download_tasks SET completed_at=updated_at WHERE status='completed'",
+          );
+          database.execute('PRAGMA user_version = 3');
         }
         for (final query in [
           'SELECT create_input_json,${_taskColumns.join(',')} FROM download_tasks LIMIT 0',
@@ -420,6 +429,7 @@ const _taskColumns = [
   'last_error_json',
   'created_at',
   'updated_at',
+  'completed_at',
 ];
 List<Object?> _taskValues(DownloadTask task) => [
   task.id,
@@ -445,6 +455,7 @@ List<Object?> _taskValues(DownloadTask task) => [
   _encode(task.engineReceipt?.toJson()), _encode(task.pendingCommand?.toJson()),
   _encode(task.publishOperation?.toJson()), _encode(task.lastError?.toJson()),
   task.createdAt.millisecondsSinceEpoch, task.updatedAt.millisecondsSinceEpoch,
+  task.completedAt?.millisecondsSinceEpoch,
 ];
 DownloadTask _taskFromRow(Row row) => DownloadTask(
   id: row['id'] as String,
@@ -477,6 +488,7 @@ DownloadTask _taskFromRow(Row row) => DownloadTask(
   lastError: _decodeNullable(row['last_error_json'], DownloadFailure.fromJson),
   createdAt: _date(row['created_at']),
   updatedAt: _date(row['updated_at']),
+  completedAt: row['completed_at'] == null ? null : _date(row['completed_at']),
 );
 Map<String, Object?> _target(Row row) {
   final value = row['target_ref'];

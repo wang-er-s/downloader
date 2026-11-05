@@ -36,15 +36,17 @@ Apple/Windows 使用 `platformFileStorage(journal: pluginEngine.publicationJourn
 | Plugin `commands.sqlite` v2 | 保留 executions/commands/acknowledgements；事务迁移 v1，新增 complete_sources(id,ref,members)、material_releases(id,ack,done) |
 | Android `android_execution_v1.db` v8 | 依次保留 v1–v7 历史，新增 completed_sources(engine,generation,ref,members,ack,done) |
 
-未知版本拒绝，迁移失败回滚留库，禁止删库重建；AppStore 为四表 v2（仅增加原始创建输入列，见[持久化契约](persistence.md)）。旧 completed 可通过同发布身份的本地回执重放补登记 opaque 引用、生成新完成版本，不新增 GET/目标。
+未知版本拒绝，迁移失败回滚留库，禁止删库重建；AppStore 为四表 v3（含原始创建输入及完成时间列，见[持久化契约](persistence.md)）。旧 completed 可通过同发布身份的本地回执重放补登记 opaque 引用、生成新完成版本，不新增 GET/目标。
 
 ## 3. Contracts
 
 - 默认目录 DTO：Android/macOS/Windows 为 systemDownloads、displayName=Downloader；iOS 为 appDocuments、displayName=Downloads。原生实际定位为 Android 公共 Download/Downloader、macOS/Windows 系统当前用户 Downloads/Downloader、iOS Documents/Downloads。不硬编码用户路径或静默以 sandbox 替代公共目录。选择取消返回 null，保留旧设置；SAF URI、Apple bookmark/security scope、Windows 路径分别验证。
 - 源路径不是授权。Plugin 从当前同执行 publishing 回执和已登记 EngineTask 核对源、完整长度、固定目录、未 detached；Android 从原生日志核验。执行侧 PublicationJournal 唯一持久写入，AppStore 只镜像。prepared/creating 先于外部创建，源与目录固定幂等；创建结果或 identity 未知返回 uncertain，不按唯一名认领、不新建第二项。
+- Android executions.input 保存的是 `{method, arguments}` 命令信封；发布目录必须从 `arguments.input.directory` 读取并与 operation.directory 做规范化比较，不能把信封当 EngineTask。目录或长度不匹配仍在创建前拒绝，不修改旧数据库格式。
 - 复制须真实关闭并核对完整字节；finalizing 先保存候选及已知身份，再不覆盖发布，重名递增。recoverPublication 只读核对，返回 notCreated/staged/published/needsPermission/uncertain，不创建/改名/删除或补写回执。已保存最终身份但回执未提交时，显式 publish 重放仅补本地回执。
 - Apple 从核验源 fd 向 O_EXCL 新最终 fd 流复制，fsync/close 后返回独立最终 identity；publishAttempt、temporaryIdentity、keepTemporary 为内部记录。最终创建回复丢失或最终 identity 未持久则 uncertain。Apple/SAF 现存目标 cleanup/delete 安全拒绝，Apple 发布后用户目录临时副本保留，均为功能缺口；不能用检查后路径 unlink/quarantine rename 掩盖竞态。
-- Windows 用核验源 HANDLE 执行 FileRenameInfo、ReplaceIfExists=false，关联核验父目录 HANDLE；窗口拥有串行 worker，平台线程交付结果，析构停接并 join 后释放 messenger。只有源码审查，没有 Windows 构建/运行证据。Android MediaStore 使用本应用保存的 pending 行 URI；SAF 仅支持系统 com.android.externalstorage.documents/com.android.externalstorage 提供方，直接创建最终候选并保存 URI/fd identity 后复制，避免 renameDocument 换 URI/覆盖语义。未知身份 uncertain，其他提供方创建前 directoryUnsupported；本轮 MediaStore/SAF 只编译，未运行提供方。
+- Windows 用核验源 HANDLE 执行 FileRenameInfo、ReplaceIfExists=false，关联核验父目录 HANDLE；窗口拥有串行 worker，平台线程交付结果，析构停接并 join 后释放 messenger。只有源码审查，没有 Windows 构建/运行证据。Android MediaStore 使用本应用保存的 pending 行 URI；SAF 仅支持系统 com.android.externalstorage.documents/com.android.externalstorage 提供方，直接创建最终候选并保存 URI/fd identity 后复制，避免 renameDocument 换 URI/覆盖语义。未知身份 uncertain，其他提供方创建前 directoryUnsupported；MediaStore 已有下述模拟器局部证据，SAF 仍缺提供方运行验证。
+- MediaStore/SAF 的 SIZE 元数据可能晚于已关闭写入刷新；复制后和恢复判断长度用已保存 URI 的只读 fd fstat，并在同一 fd 核验 token/dev/inode。继续核验提供方归属、目录和 MediaStore IS_PENDING，不因元数据滞后重复创建目标。
 - 取消：持久 cancelling → 原 EngineCommand.cancel 真实停止/关闭并保存回执 → 未清理发布项触发 cleanupFailure → cleanupPendingPublication → 成功后重放完全相同原 cancel。cleaning 先于删除，证明未创建/已清理才记 cleaned；删除后日志失败重开只核对补存。uncertain、失权、published 拒绝自动清理，保留源/操作/任务。完成文件删除另走显式 deleteOwned。
 - completed 回执通过 resumeRef 暴露 `complete:` opaque 稳定引用；resumeSupport=unsupported 也可承载释放引用，绝不表示可续传。引用仅索引引擎登记集合，不解释调用方路径。Plugin 集合为完整源和历史 ownedMaterials/桌面 resumeData，Android 为登记 payload/facts 配对集合。用户最终文件/用户目录临时副本不在私有集合。iOS URLSession opaque resume blob 不解析为路径，不声称回收系统临时下载文件。
 - Repository 必须以同一 AppStore 事务 commitReceipt 保存业务 completed、完整 EngineReceipt、最终 FileLocation、published PublishOperation 与完整 ReceiptAck（显式 releaseResumeRefs），提交后再 acknowledge。两 Dart 桥读完整已提交 ack 并核对业务完成/完整发布身份/回执；引擎另验当前完整 key/版本、登记引用、无较新分支/活动 worker。普通空 ack、旧/伪造 ack、单纯 publish 返回不删完整源；同版本 ack 不可事后换释放载荷。
@@ -62,6 +64,8 @@ Apple/Windows 使用 `platformFileStorage(journal: pluginEngine.publicationJourn
 | cleanup 不明、published 或 Apple/SAF 现存项 | cleanupFailure，保留意图与文件，不移除任务 |
 | ack 未提交、旧引用、非普通/越界成员、异步授权变化 | stateConflict，拒绝继续释放；集合预验失败零删除 |
 | delete/done/最终 ack 保存失败 | 不推进最终确认，重开重放原完整 ack |
+| Android 8+ 打开 APK 未允许安装未知应用 | 经主线程启动本应用 ACTION_MANAGE_UNKNOWN_APP_SOURCES 页面，返回 installPermissionRequired；UI 提示授权后返回再点打开，不自动安装 |
+| 无可用打开应用/授权页面 | noHandler，UI 明确提示未找到可打开文件的应用，保留文件 |
 
 诊断落库失败不掩盖首异常；初始化/读取/锁及全部底层异常的结构化映射仍未完整验收。
 
@@ -74,6 +78,10 @@ Apple/Windows 使用 `platformFileStorage(journal: pluginEngine.publicationJourn
 ## 6. Tests Required
 
 最新 completed-release 独立检查：57 focused（55桥＋2真实 SQLite 锁）、macOS 5引擎＋9文件真实集成、flutter analyze 干净；Android JVM 独立 --rerun-tasks，6份 XML 共93项，失败/错误/跳过0。本轮规范同步不重跑产品测试。
+
+Android 保存修复新增[真实通道集成](../../../integration_test/android_publication_test.dart)：连接的 arm64 模拟器执行通知授权、HTTP 65536 字节、目录/长度篡改拒绝、MediaStore 发布/恢复/同 URI 重放、completed 回执和显式删除测试目标，GET=1且普通发布保留源；最终日志 `/tmp/android-publication-integration-final.log` exit0。此前先复现 publicationSource/stateConflict，再复现提供方 SIZE 滞后/fileWriteFailure；修复后通过。同期165项Flutter测试、analyze和Gradle JVM测试通过；不证明用户真机、SAF、崩溃恢复或跨平台完整验收。
+
+APK 打开回归：上述集成改用 `.apk` 测试文件，在未允许安装未知应用时验证 installPermissionRequired、UI授权提示及文件仍 published；`/tmp/android-apk-open-integration.log` exit0，ActivityTaskManager 确认 Settings$ManageAppExternalSourcesActivity 已启动。测试字节并非可安装包，尚未验证授权后的真实 APK 安装或厂商系统；测试运行前可用 adb pm grant 单独预授通知权限，避免 UIAutomator 改变 Flutter semantics 干扰本项测试。
 
 - 断言：同名不覆盖、创建/最终未知 uncertain、已知最终身份回执补存、原 cancel 重放、外来替换/symlink、安全拒删；completed 同事务 ack、旧/伪造/未提交 ack 保源，晚目录/等待 cancelling 零删除，delete后 done 失败与最终 ack INSERT 失败重开，GET=1。
 - 真实双 isolate 与同 isolate 异步等待者均等 owner 异步 IO 完成；owner 抛错后可再取锁。未新增跨进程强杀锁主实验。

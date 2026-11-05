@@ -2,7 +2,7 @@
 
 ## 1. Scope / Trigger
 
-适用于下载领域/引擎 DTO、共享 SQLite v2 及已实现的三个 [Repository](repositories.md)。执行日志见[插件执行契约](plugin-engine.md)，用户目录发布与 completed 私有源显式释放见[文件契约](file-storage.md)。源业务方案见[设计文档](../../../.agents/specs/download-manager/design.md)。
+适用于下载领域/引擎 DTO、共享 SQLite v3 及已实现的三个 [Repository](repositories.md)。执行日志见[插件执行契约](plugin-engine.md)，用户目录发布与 completed 私有源显式释放见[文件契约](file-storage.md)。源业务方案见[设计文档](../../../.agents/specs/download-manager/design.md)。
 
 实现入口为 [AppStore](../../../lib/shared/data/app_store.dart)、[schema](../../../lib/shared/data/app_store_schema.dart) 和 [领域模型](../../../lib/features/downloads/domain/download_models.dart)。domain 仅依赖 Dart；Flutter、SQLite、插件类型不得泄漏进入领域。
 
@@ -41,7 +41,7 @@ void saveSettings(AppSettings settings);
 
 事务内另有同名类型化读取入口。`AppStore.openPersistent` 默认通过 application-support 定位 `downloader.db`；`databasePath` 仅是可测试入口，不是公共下载目录配置。不新增环境变量或网络 API。
 
-数据库固定四表：download_tasks、saved_downloads、app_settings、engine_receipt_acks；request_id、engine_id 唯一，确认主键为 `(engine_id,generation)`，无任务外键，不增加配置到任务级联。最终 v2 结构为 app_store_schema.dart 的 appStoreSchemaV1 基础 DDL 加 `ALTER TABLE download_tasks ADD COLUMN create_input_json TEXT`，不是额外业务表。
+数据库固定四表：download_tasks、saved_downloads、app_settings、engine_receipt_acks；request_id、engine_id 唯一，确认主键为 `(engine_id,generation)`，无任务外键，不增加配置到任务级联。最终 v3 结构为 app_store_schema.dart 的 appStoreSchemaV1 基础 DDL，加 v2 的 nullable create_input_json TEXT 和 v3 的 nullable completed_at INTEGER，不新增业务表。
 
 ## 3. Contracts
 
@@ -57,7 +57,8 @@ void saveSettings(AppSettings settings);
 - `saveAcknowledgement` 核对现存 engine 所属 taskId 及代次；保留旧代次确认重放能力，拒绝其他所有者或超前代次。同版本不同确认拒绝，较低版本不得替换更高版本及其 releaseResumeRefs。
 - 取消/删除事务先保存最后确认再删除任务；确认行不级联删除。普通暂停/失败确认的 releaseResumeRefs 为空，实际材料归属和释放由引擎再校验；存储不会删除文件或自行判断可回收材料。
 - `commitReceipt` 返回 false 时不能据此确认传入的新载荷：查询已提交确认并按该行重放。AppStore 不执行取消优先、发布恢复、启动协调等 Repository 状态机。
-- 初始化先拒绝非 0/1/2 版本并关闭连接、保留原库。BEGIN IMMEDIATE 内：0 执行 v1 基础 DDL，再与 1 一样增加 nullable create_input_json TEXT、设 user_version=2；2 不再 ALTER。验证四表必要列后 COMMIT，失败回滚留库、保留首异常。
+- 初始化先拒绝非 0/1/2/3 版本并关闭连接、保留原库。BEGIN IMMEDIATE 内：0 执行 v1 基础 DDL，再与1一样增加 create_input_json；0/1/2 增加 completed_at，将历史 completed 的 updated_at 回填为完成时间，设 user_version=3；3 不再 ALTER。验证四表必要列后 COMMIT，失败回滚留库、保留首异常。
+- DownloadTask.completedAt/JSON completedAt 为可空 UTC DateTime/毫秒，旧 JSON 无字段仍可读；首次提交 completed 用同一 updatedAt 时间持久化，后续新回执保留原完成时间。历史任务无法恢复独立的真实完成时刻，只能用迁移时已有 updated_at 兼容。
 - createTask 同事务保存任务和 CreateDownload.toJson() 规范化原输入；校验 requestId/URL/文件名、任务不存在、requestId 唯一及显式目录一致。NULL 目录仍表示原请求未指定目录，不能以已固化目录代替；readCreateInput 按 requestId 读取，无行或历史 NULL 返回 null。普通 saveTask 不覆盖该列；历史输入未知由仓库拒绝去重。
 - completed 显式释放使用既有 resumeRef/releaseResumeRefs 承载 complete: opaque 引用，即使 resumeSupport=unsupported 也不能解释为可续传。commitReceipt 必须同事务保存业务 completed、完整回执、最终 FileLocation、published PublishOperation 与完整 ReceiptAck，再显式 acknowledge；普通/旧 ack 不删完整源。同版本完整回执及 ack 不可变，不能先存空 ack 再改释放载荷。执行侧 Plugin commands.sqlite v2/Android execution v8 的 intent、逐成员 done 和最终 ack 不属于 AppStore 四表；恢复及异步授权重核见[文件契约](file-storage.md)。
 

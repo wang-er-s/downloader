@@ -1,6 +1,9 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:downloader/features/downloads/presentation/providers.dart';
+import 'package:downloader/features/downloads/data/publication_journal.dart';
 import 'package:sqlite3/sqlite3.dart';
 import 'package:downloader/shared/data/app_store.dart';
 import 'package:downloader/shared/data/app_store_schema.dart';
@@ -122,6 +125,8 @@ class FakeEngine implements DownloadEngine {
 }
 
 class FakeStorage implements FileStorage {
+  int deletions = 0;
+  Future<void> Function(FileLocation)? onDelete;
   int publications = 0;
   int reads = 0;
   Future<FileLocation> Function(PublishOperation)? onPublish;
@@ -141,7 +146,11 @@ class FakeStorage implements FileStorage {
   }
 
   @override
-  Future<void> deleteOwned(FileLocation file) async {}
+  Future<void> deleteOwned(FileLocation file) async {
+    deletions++;
+    await onDelete?.call(file);
+  }
+
   @override
   Future<void> open(FileLocation file) async {}
 }
@@ -373,7 +382,7 @@ void main() {
       final raw = sqlite3.openInMemory();
       raw.execute(appStoreSchemaV1);
       final migrated = AppStore(raw);
-      expect(raw.userVersion, 2);
+      expect(raw.userVersion, 3);
       expect(
         raw.select("SELECT name FROM sqlite_master WHERE type='table'").length,
         4,
@@ -708,6 +717,110 @@ void main() {
       expect(store.readTask(task.id), isNull);
     },
   );
+  for (final deleteFiles in [false, true]) {
+    test(
+      'clear completed preserves other records; deleteFiles=$deleteFiles',
+      () async {
+        final first = await create('first');
+        final second = await create('second');
+        final active = await create('active');
+        engine.receipts.addAll([completed(first, 1), completed(second, 1)]);
+        await repository.synchronize();
+        await saved.save(
+          SavedDownloadInput(id: 'cache', url: 'https://example.com/a'),
+        );
+        final container = ProviderContainer(
+          overrides: [
+            dependenciesProvider.overrideWithValue((
+              downloads: repository,
+              saved: saved,
+              settings: settings,
+              storage: storage,
+            )),
+          ],
+        );
+        try {
+          final result = await container
+              .read(downloadsControllerProvider.notifier)
+              .clearCompleted([first.id, second.id], deleteFiles);
+          expect(result, isTrue);
+          expect(store.readTasks().single.id, active.id);
+          expect(storage.deletions, deleteFiles ? 2 : 0);
+          expect(store.readSavedDownloads().single.id, 'cache');
+        } finally {
+          container.dispose();
+        }
+      },
+    );
+  }
+  test(
+    'clear completed stops on file deletion failure and retains remaining records',
+    () async {
+      final first = await create('first');
+      final second = await create('second');
+      final third = await create('third');
+      engine.receipts.addAll([
+        completed(first, 1),
+        completed(second, 1),
+        completed(third, 1),
+      ]);
+      await repository.synchronize();
+      storage.onDelete = (_) async {
+        if (storage.deletions == 2) {
+          throw FileStorageException(
+            DownloadFailure(
+              code: FailureCode.cleanupFailure,
+              message: 'blocked',
+            ),
+          );
+        }
+      };
+      final container = ProviderContainer(
+        overrides: [
+          dependenciesProvider.overrideWithValue((
+            downloads: repository,
+            saved: saved,
+            settings: settings,
+            storage: storage,
+          )),
+        ],
+      );
+      try {
+        final result = await container
+            .read(downloadsControllerProvider.notifier)
+            .clearCompleted([first.id, second.id, third.id], true);
+        expect(result, isFalse);
+        expect(storage.deletions, 2);
+        expect(store.readTask(first.id), isNull);
+        expect(store.readTask(second.id)!.status, DownloadStatus.deleting);
+        expect(store.readTask(third.id)!.status, DownloadStatus.completed);
+        expect(
+          container.read(downloadsControllerProvider).error,
+          contains('文件清理未完成'),
+        );
+        expect(container.read(downloadsControllerProvider).busy, isEmpty);
+      } finally {
+        container.dispose();
+      }
+    },
+  );
+
+  test('completion time persists across newer completed receipts', () async {
+    final task = await create();
+    engine.receipts.add(completed(task, 1));
+    await repository.synchronize();
+    final first = store.readTask(task.id)!;
+    expect(first.completedAt, first.updatedAt);
+    await Future<void>.delayed(const Duration(milliseconds: 5));
+    engine.receipts
+      ..clear()
+      ..add(completed(task, 2));
+    await repository.synchronize();
+    final refreshed = store.readTask(task.id)!;
+    expect(refreshed.engineReceipt!.receiptVersion, 2);
+    expect(refreshed.updatedAt.isAfter(first.updatedAt), isTrue);
+    expect(refreshed.completedAt, first.completedAt);
+  });
   test(
     'delete record retains complete authorization until full ack succeeds',
     () async {

@@ -97,6 +97,13 @@ class DownloadsPage extends ConsumerWidget {
                               (category == 1),
                         )
                         .toList();
+                    if (category == 1) {
+                      items.sort(
+                        (a, b) => (b.completedAt ?? b.updatedAt).compareTo(
+                          a.completedAt ?? a.updatedAt,
+                        ),
+                      );
+                    }
                     if (items.isEmpty) {
                       return EmptyPanel(
                         label: category == 0 ? '暂无进行中的下载' : '暂无已完成文件',
@@ -194,6 +201,13 @@ Future<bool> confirmAction(
     ) ??
     false;
 
+String completionTimeLabel(DateTime time) {
+  final local = time.toLocal();
+  String two(int value) => value.toString().padLeft(2, '0');
+  return '${local.year}-${two(local.month)}-${two(local.day)} '
+      '${two(local.hour)}:${two(local.minute)}';
+}
+
 class DownloadCard extends ConsumerWidget {
   const DownloadCard({super.key, required this.task});
   final DownloadTask task;
@@ -211,7 +225,7 @@ class DownloadCard extends ConsumerWidget {
             title: const Text('下载详情'),
             scrollable: true,
             content: SelectableText(
-              '${task.displayName}\n\n${task.originalUrl}\n\n保存目录：${task.directory.displayName}\n${statusLabel(task.status)}\n${task.lastError?.message ?? ''}',
+              '${task.displayName}\n\n${task.originalUrl}\n\n保存目录：${task.directory.displayName}\n${statusLabel(task.status)}${task.status == DownloadStatus.completed ? '' : '\n速度未知 · 剩余时间未知'}\n${task.lastError?.message ?? ''}',
             ),
             actions: [
               TextButton(
@@ -246,8 +260,11 @@ class DownloadCard extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final busy = ref.watch(downloadsControllerProvider).busy.contains(task.id);
     final completed = task.status == DownloadStatus.completed;
+    final operation = ref.watch(downloadsControllerProvider);
+    final busy =
+        operation.busy.contains(task.id) ||
+        (completed && operation.busy.contains('clearCompleted'));
     final pausable = [
       DownloadStatus.running,
       DownloadStatus.queued,
@@ -259,9 +276,9 @@ class DownloadCard extends ConsumerWidget {
     ].contains(task.status);
     final controller = ref.read(downloadsControllerProvider.notifier);
     return Card(
-      margin: const EdgeInsets.only(bottom: 16),
+      margin: const EdgeInsets.only(bottom: 8),
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -275,19 +292,31 @@ class DownloadCard extends ConsumerWidget {
                 Expanded(
                   child: InkWell(
                     onTap: () => action(context, ref, 'details'),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 8),
+                    child: Container(
+                      constraints: const BoxConstraints(minHeight: 48),
+                      padding: const EdgeInsets.symmetric(vertical: 4),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
                             task.displayName,
-                            maxLines: 2,
+                            maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: Theme.of(context).textTheme.titleMedium,
                           ),
-                          const SizedBox(height: 4),
-                          Text(statusLabel(task.status)),
+                          const SizedBox(height: 2),
+                          if (completed)
+                            Text(
+                              bytesLabel(task.downloadedBytes),
+                              style: Theme.of(context).textTheme.bodySmall,
+                            )
+                          else
+                            Text(
+                              '${statusLabel(task.status)} · ${bytesLabel(task.downloadedBytes)} / '
+                              '${task.totalBytes == null ? '总大小未知' : bytesLabel(task.totalBytes!)}'
+                              '${task.progress != null ? ' · ${(task.progress! * 100).toStringAsFixed(0)}%' : ''}',
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
                         ],
                       ),
                     ),
@@ -343,8 +372,18 @@ class DownloadCard extends ConsumerWidget {
                 ),
               ],
             ),
-            const SizedBox(height: 12),
+            if (completed)
+              Padding(
+                padding: const EdgeInsets.only(left: 36, top: 2),
+                child: Text(
+                  completionTimeLabel(task.completedAt ?? task.updatedAt),
+                  semanticsLabel:
+                      '完成时间 ${completionTimeLabel(task.completedAt ?? task.updatedAt)}',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ),
             if (!completed) ...[
+              const SizedBox(height: 4),
               LinearProgressIndicator(
                 value: task.progress?.clamp(0, 1),
                 semanticsLabel: '下载进度',
@@ -352,27 +391,10 @@ class DownloadCard extends ConsumerWidget {
                     ? '百分比未知'
                     : '${(task.progress! * 100).toStringAsFixed(0)}%',
               ),
-              const SizedBox(height: 12),
             ],
-            Wrap(
-              spacing: 16,
-              runSpacing: 8,
-              children: [
-                Text(
-                  '${bytesLabel(task.downloadedBytes)} / ${task.totalBytes == null ? '总大小未知' : bytesLabel(task.totalBytes!)}',
-                ),
-                if (!completed)
-                  Text(
-                    task.progress == null
-                        ? '百分比未知'
-                        : '${(task.progress! * 100).toStringAsFixed(0)}%',
-                  ),
-                if (!completed) const Text('速度未知 · 剩余时间未知'),
-              ],
-            ),
             if (task.lastError != null)
               Padding(
-                padding: const EdgeInsets.only(top: 12),
+                padding: const EdgeInsets.only(top: 8),
                 child: Text(
                   errorMessage(RepositoryException(task.lastError!)),
                   style: TextStyle(color: Theme.of(context).colorScheme.error),
@@ -387,7 +409,7 @@ class DownloadCard extends ConsumerWidget {
               ),
             if (busy)
               const Padding(
-                padding: EdgeInsets.only(top: 12),
+                padding: EdgeInsets.only(top: 8),
                 child: Text('正在处理，请等待实际停止与保存结果…', semanticsLabel: '操作处理中'),
               ),
           ],
@@ -397,8 +419,42 @@ class DownloadCard extends ConsumerWidget {
   }
 }
 
+class ClearCompletedButton extends ConsumerWidget {
+  const ClearCompletedButton({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final tasks = ref.watch(tasksProvider).asData?.value;
+    final ids =
+        tasks
+            ?.where((task) => task.status == DownloadStatus.completed)
+            .map((task) => task.id)
+            .toList() ??
+        <String>[];
+    final busy = ref.watch(downloadsControllerProvider).busy.isNotEmpty;
+    return IconButton(
+      tooltip: '清空已下载',
+      icon: const Icon(Icons.delete_sweep_outlined),
+      onPressed: ids.isEmpty || busy
+          ? null
+          : () async {
+              final deleteFiles = await showDialog<bool>(
+                context: context,
+                builder: (_) => const DeleteDownloadDialog(clearAll: true),
+              );
+              if (deleteFiles != null && context.mounted) {
+                await ref
+                    .read(downloadsControllerProvider.notifier)
+                    .clearCompleted(ids, deleteFiles);
+              }
+            },
+    );
+  }
+}
+
 class DeleteDownloadDialog extends StatefulWidget {
-  const DeleteDownloadDialog({super.key});
+  const DeleteDownloadDialog({super.key, this.clearAll = false});
+  final bool clearAll;
   @override
   State<DeleteDownloadDialog> createState() => _DeleteDownloadDialogState();
 }
@@ -407,15 +463,17 @@ class _DeleteDownloadDialogState extends State<DeleteDownloadDialog> {
   bool deleteFile = false;
   @override
   Widget build(BuildContext context) => AlertDialog(
-    title: const Text('删除下载记录'),
+    title: Text(widget.clearAll ? '清空已下载' : '删除下载记录'),
     scrollable: true,
     content: Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        const Text('默认只删除记录，保留已下载文件。'),
+        Text(
+          widget.clearAll ? '清空当前已完成列表中的所有记录，默认保留本地已下载文件。' : '默认只删除记录，保留已下载文件。',
+        ),
         CheckboxListTile(
           contentPadding: EdgeInsets.zero,
-          title: const Text('同时删除已下载文件'),
+          title: const Text('同时删除本地已下载文件'),
           value: deleteFile,
           onChanged: (value) => setState(() => deleteFile = value!),
         ),
@@ -428,7 +486,7 @@ class _DeleteDownloadDialogState extends State<DeleteDownloadDialog> {
       ),
       FilledButton(
         onPressed: () => Navigator.pop(context, deleteFile),
-        child: const Text('删除'),
+        child: Text(widget.clearAll ? '清空' : '删除'),
       ),
     ],
   );

@@ -81,6 +81,7 @@ class FileStorageChannel(
                             }
                         AndroidEngineRuntime.main.post { result.success(value) }
                     } catch (error: Exception) {
+                        android.util.Log.e("FileStorage", "${call.method} failed; original download retained", error)
                         val code =
                             when (error) {
                                 is EngineProtocolException -> error.code
@@ -146,7 +147,11 @@ class FileStorageChannel(
             fail("directoryUnsupported")
         }
         val provider = activity.packageManager.resolveContentProvider(tree.authority!!, 0) ?: fail("directoryUnsupported")
-        if (provider.packageName != "com.android.externalstorage" || provider.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM == 0) fail("directoryUnsupported")
+        if (provider.packageName != "com.android.externalstorage" ||
+            provider.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM == 0
+        ) {
+            fail("directoryUnsupported")
+        }
     }
 
     private fun fail(code: String): Nothing = throw EngineProtocolException(code, "fileStorage")
@@ -274,6 +279,17 @@ class FileStorageChannel(
         } ?: fail("publicationUncertain")
     }
 
+    private fun verifiedLength(record: JSONObject): Long {
+        val uri = Uri.parse(record.getString("uri"))
+        val token = if (record.getBoolean("media")) uri.toString() else DocumentsContract.getDocumentId(uri)
+        return resolver.openFileDescriptor(uri, "r")?.use { descriptor ->
+            val stat = android.system.Os.fstat(descriptor.fileDescriptor)
+            if ("$token:${stat.st_dev}:${stat.st_ino}" != record.getString("identity")) fail("publicationUncertain")
+            // Provider SIZE metadata may lag a closed write; verify the saved file descriptor identity and length.
+            stat.st_size
+        } ?: fail("publicationUncertain")
+    }
+
     private fun verify(record: JSONObject): Map<String, Any?>? {
         if (!record.has("uri")) return null
         val media = record.getBoolean("media")
@@ -315,12 +331,16 @@ class FileStorageChannel(
     private fun recovered(record: JSONObject): Map<String, Any?> {
         val phase = record.getString("phase")
         if (phase == "cleaned") return mapOf("version" to 1, "disposition" to "notCreated")
-        if (!record.has("uri")) return mapOf("version" to 1, "disposition" to if (phase in setOf("prepared", "cleaning")) "notCreated" else "uncertain")
+        if (!record.has("uri")) {
+            return mapOf(
+                "version" to 1,
+                "disposition" to if (phase in setOf("prepared", "cleaning")) "notCreated" else "uncertain",
+            )
+        }
         if (!record.has("identity")) return mapOf("version" to 1, "disposition" to "uncertain")
         val row = verify(record) ?: return mapOf("version" to 1, "disposition" to if (phase == "cleaning") "notCreated" else "uncertain")
         val media = record.getBoolean("media")
-        val size = (row[if (media) MediaStore.MediaColumns.SIZE else DocumentsContract.Document.COLUMN_SIZE] as? String)?.toLongOrNull()
-        val complete = size == record.getLong("length")
+        val complete = verifiedLength(record) == record.getLong("length")
         val published =
             if (media) {
                 row[MediaStore.MediaColumns.IS_PENDING] == "0" && complete
@@ -359,8 +379,11 @@ class FileStorageChannel(
         if (disposition == "staged") {
             verify(record) ?: fail("cleanupFailure")
             val uri = Uri.parse(record.getString("uri"))
-            if (record.getBoolean("media")) { if (resolver.delete(uri, null, null) != 1) fail("cleanupFailure") }
-            else fail("cleanupFailure") // SAF document IDs encode paths; deleteDocument cannot bind the checked inode.
+            if (record.getBoolean("media")) {
+                if (resolver.delete(uri, null, null) != 1) fail("cleanupFailure")
+            } else {
+                fail("cleanupFailure") // SAF document IDs encode paths; deleteDocument cannot bind the checked inode.
+            }
         }
         if (recovered(record)["disposition"] != "notCreated") fail("cleanupFailure")
         save(op, record, "cleaned")
@@ -435,17 +458,20 @@ class FileStorageChannel(
                     FileInputStream(source).use { input ->
                         android.os.ParcelFileDescriptor.AutoCloseOutputStream(output).use { target ->
                             val count = input.copyTo(target, 1024 * 1024)
-                            if (count != length || source.length() != length || android.system.Os.fstat(target.fd).st_size != length) fail("fileWriteFailure")
+                            if (count != length || source.length() != length ||
+                                android.system.Os
+                                    .fstat(target.fd)
+                                    .st_size != length
+                            ) {
+                                fail("fileWriteFailure")
+                            }
                             target.flush()
                             target.fd.sync()
                         }
                     }
                 } ?: fail("fileWriteFailure")
-                val row = verify(record) ?: fail("publicationUncertain")
-                val size =
-                    (row[if (media) MediaStore.MediaColumns.SIZE else DocumentsContract.Document.COLUMN_SIZE] as? String)
-                        ?.toLongOrNull()
-                if (size != length) fail("fileWriteFailure")
+                verify(record) ?: fail("publicationUncertain")
+                if (verifiedLength(record) != length) fail("fileWriteFailure")
                 save(op, record, "finalizing")
             }
             if (record.getString("phase") == "finalizing") {
@@ -462,20 +488,27 @@ class FileStorageChannel(
             if (final["disposition"] != "published") fail("publicationUncertain")
             val file = location(record)
             val finalRow = verify(record) ?: fail("publicationUncertain")
-            val actualName = finalRow[if (media) MediaStore.MediaColumns.DISPLAY_NAME else DocumentsContract.Document.COLUMN_DISPLAY_NAME] as? String ?: fail("publicationUncertain")
+            val actualName =
+                finalRow[if (media) MediaStore.MediaColumns.DISPLAY_NAME else DocumentsContract.Document.COLUMN_DISPLAY_NAME] as? String
+                    ?: fail("publicationUncertain")
             record.put("actualName", actualName)
             save(op, record, "published")
             log.publicationReceipt(op + mapOf("candidateName" to actualName), file)
             return file
         } catch (error: Exception) {
-            val code = when (error) {
-                is EngineProtocolException -> error.code
-                is SecurityException -> "permissionDenied"
-                is android.database.sqlite.SQLiteException -> "persistenceFailure"
-                else -> "fileWriteFailure"
-            }
+            val code =
+                when (error) {
+                    is EngineProtocolException -> error.code
+                    is SecurityException -> "permissionDenied"
+                    is android.database.sqlite.SQLiteException -> "persistenceFailure"
+                    else -> "fileWriteFailure"
+                }
             record.put("error", JSONObject().put("code", code).put("message", "文件操作未完成，原始下载已保留"))
-            try { save(op, record, record.getString("phase")) } catch (diagnostic: Exception) { error.addSuppressed(diagnostic) }
+            try {
+                save(op, record, record.getString("phase"))
+            } catch (diagnostic: Exception) {
+                error.addSuppressed(diagnostic)
+            }
             throw error
         }
     }
@@ -517,16 +550,24 @@ class FileStorageChannel(
             return null
         }
         val type = mime(stored.getString("candidate"))
-        if (type == "application/vnd.android.package-archive" && Build.VERSION.SDK_INT >= 26 &&
-            !activity.packageManager.canRequestPackageInstalls()
-        ) {
-            fail("installPermissionRequired")
-        }
-        val intent = Intent(Intent.ACTION_VIEW).setDataAndType(uri, type).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        val installPermissionRequired =
+            type == "application/vnd.android.package-archive" && Build.VERSION.SDK_INT >= 26 &&
+                !activity.packageManager.canRequestPackageInstalls()
+        val intent =
+            if (installPermissionRequired) {
+                Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${activity.packageName}"))
+            } else {
+                Intent(Intent.ACTION_VIEW).setDataAndType(uri, type).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
         if (intent.resolveActivity(activity.packageManager) == null) fail("noHandler")
         val opened = java.util.concurrent.FutureTask<Unit> { activity.startActivity(intent) }
         AndroidEngineRuntime.main.post(opened)
-        try { opened.get() } catch (error: Exception) { fail("noHandler") }
+        try {
+            opened.get()
+        } catch (error: Exception) {
+            fail("noHandler")
+        }
+        if (installPermissionRequired) fail("installPermissionRequired")
         return null
     }
 

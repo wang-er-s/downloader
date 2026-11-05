@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sqlite3/sqlite3.dart';
 import 'package:downloader/shared/data/app_store.dart';
+import 'package:downloader/shared/data/app_store_schema.dart';
 import 'package:downloader/shared/platform/app_store_location.dart';
 import 'package:downloader/features/downloads/domain/download_models.dart';
 import 'package:downloader/features/saved_downloads/domain/saved_download.dart';
@@ -18,8 +19,8 @@ void main() {
   });
   tearDown(() => store.close());
 
-  test('atomic schema creates exactly design tables and v2', () {
-    expect(db.select('PRAGMA user_version').single['user_version'], 2);
+  test('atomic schema creates exactly design tables and v3', () {
+    expect(db.select('PRAGMA user_version').single['user_version'], 3);
     expect(
       db
           .select("SELECT name FROM sqlite_master WHERE type='table'")
@@ -34,8 +35,64 @@ void main() {
     );
     expect(
       db.select('PRAGMA table_info(download_tasks)').map((row) => row['name']),
-      containsAll(['pending_command_json', 'publish_operation_json']),
+      containsAll([
+        'pending_command_json',
+        'publish_operation_json',
+        'completed_at',
+      ]),
     );
+  });
+  test('v2 completion times migrate once and survive updates and reopen', () {
+    final root = Directory.systemTemp.createTempSync('completion-migrate-');
+    final path = '${root.path}/db';
+    final raw = sqlite3.open(path);
+    raw.execute(appStoreSchemaV1);
+    raw.execute('ALTER TABLE download_tasks ADD COLUMN create_input_json TEXT');
+    raw.execute('PRAGMA user_version = 2');
+    for (final status in ['completed', 'paused']) {
+      raw.execute(
+        'INSERT INTO download_tasks(id,request_id,engine_id,original_url,display_name,directory_json,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)',
+        [
+          status,
+          status,
+          status,
+          'https://example.com/file',
+          'file.bin',
+          jsonEncode(directory.toJson()),
+          status,
+          1000,
+          2000,
+        ],
+      );
+    }
+    final migrated = AppStore(raw);
+    try {
+      final completed = migrated.readTask('completed')!;
+      expect(raw.userVersion, 3);
+      expect(completed.completedAt!.millisecondsSinceEpoch, 2000);
+      expect(migrated.readTask('paused')!.completedAt, isNull);
+      migrated.transaction(
+        (tx) => tx.saveTask(
+          DownloadTask.fromJson({...completed.toJson(), 'updatedAt': 3000}),
+        ),
+      );
+    } finally {
+      migrated.close();
+    }
+    final reopened = AppStore(sqlite3.open(path));
+    try {
+      expect(
+        reopened.readTask('completed')!.completedAt!.millisecondsSinceEpoch,
+        2000,
+      );
+      expect(
+        reopened.readTask('completed')!.updatedAt.millisecondsSinceEpoch,
+        3000,
+      );
+    } finally {
+      reopened.close();
+      root.deleteSync(recursive: true);
+    }
   });
   test('typed task and nested JSON round trip including owned location', () {
     final original = DownloadTask.fromJson({
@@ -43,6 +100,7 @@ void main() {
       'pendingCommand': command.toJson(),
       'publishOperation': publication.toJson(),
       'targetRef': '{opaque-reference}',
+      'completedAt': now.millisecondsSinceEpoch,
       'lastError': DownloadFailure(
         code: FailureCode.persistenceFailure,
         message: '保存失败',

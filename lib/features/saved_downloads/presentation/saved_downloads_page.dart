@@ -34,9 +34,12 @@ class SavedDownloadsPage extends ConsumerWidget {
                   .contains(saved.id);
               final controller = ref.read(downloadsControllerProvider.notifier);
               return Card(
-                margin: const EdgeInsets.only(bottom: 16),
+                margin: const EdgeInsets.only(bottom: 8),
                 child: Padding(
-                  padding: const EdgeInsets.all(16),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 8,
+                  ),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -45,11 +48,53 @@ class SavedDownloadsPage extends ConsumerWidget {
                           const Icon(Icons.bookmark_border),
                           const SizedBox(width: 12),
                           Expanded(
-                            child: Text(
-                              saved.fileName ?? saved.url,
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                              style: Theme.of(context).textTheme.titleMedium,
+                            child: InkWell(
+                              onTap: () => showDialog<void>(
+                                context: context,
+                                builder: (context) => AlertDialog(
+                                  title: const Text('缓存详情'),
+                                  scrollable: true,
+                                  content: SelectableText(
+                                    '${saved.displayName}\n${saved.url}\n保存目录：${saved.directory?.displayName ?? '默认目录'}',
+                                  ),
+                                  actions: [
+                                    TextButton(
+                                      onPressed: () => Navigator.pop(context),
+                                      child: const Text('关闭'),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              child: Container(
+                                constraints: const BoxConstraints(
+                                  minHeight: 48,
+                                ),
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 4,
+                                ),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      saved.displayName,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: Theme.of(
+                                        context,
+                                      ).textTheme.titleMedium,
+                                    ),
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      saved.url,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: Theme.of(
+                                        context,
+                                      ).textTheme.bodySmall,
+                                    ),
+                                  ],
+                                ),
+                              ),
                             ),
                           ),
                           IconButton(
@@ -93,30 +138,6 @@ class SavedDownloadsPage extends ConsumerWidget {
                           ),
                         ],
                       ),
-                      TextButton(
-                        onPressed: () => showDialog<void>(
-                          context: context,
-                          builder: (context) => AlertDialog(
-                            title: const Text('缓存详情'),
-                            scrollable: true,
-                            content: SelectableText(
-                              '${saved.fileName ?? ''}\n${saved.url}\n保存目录：${saved.directory?.displayName ?? '默认目录'}',
-                            ),
-                            actions: [
-                              TextButton(
-                                onPressed: () => Navigator.pop(context),
-                                child: const Text('关闭'),
-                              ),
-                            ],
-                          ),
-                        ),
-                        child: Text(
-                          saved.url,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                      Text('保存目录：${saved.directory?.displayName ?? '默认目录'}'),
                       if (busy) const Text('正在创建下载，请等待实际结果…'),
                     ],
                   ),

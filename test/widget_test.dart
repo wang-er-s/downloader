@@ -139,6 +139,232 @@ void main() {
     await engine.eventsController.close();
   });
 
+  testWidgets(
+    'completed rows sort newest first using completion time and legacy fallback',
+    (tester) async {
+      DownloadTask finished(String id, int day, {int? completionDay}) =>
+          DownloadTask.fromJson({
+            ...task(id, DownloadStatus.completed).toJson(),
+            'updatedAt': DateTime.utc(2026, 11, day).millisecondsSinceEpoch,
+            'completedAt': completionDay == null
+                ? null
+                : DateTime.utc(2026, 11, completionDay).millisecondsSinceEpoch,
+          });
+      final items = List<DownloadTask>.unmodifiable([
+        finished('older', 10, completionDay: 1),
+        task('paused-z', DownloadStatus.paused),
+        finished('legacy', 3),
+        finished('newest', 6, completionDay: 5),
+        task('paused-a', DownloadStatus.paused),
+      ]);
+      for (final category in [1, 0]) {
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              dependenciesProvider.overrideWithValue(deps.presentation),
+              tasksProvider.overrideWith((ref) => Stream.value(items)),
+            ],
+            child: MaterialApp(
+              home: Scaffold(
+                body: DownloadsPage(
+                  category: category,
+                  onCategoryChanged: (_) {},
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(
+          tester
+              .widgetList<DownloadCard>(find.byType(DownloadCard))
+              .map((card) => card.task.id)
+              .toList(),
+          category == 1
+              ? ['newest', 'legacy', 'older']
+              : ['paused-z', 'paused-a'],
+        );
+        expect(tester.takeException(), isNull);
+      }
+      expect(items.first.id, 'older');
+    },
+  );
+
+  testWidgets('compact download rows retain details and touch targets', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(320, 900);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPhysicalSize);
+    const name = '很长的下载文件名用于检查紧凑列表仍能查看完整内容';
+    for (final scale in [1.0, 2.0]) {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            dependenciesProvider.overrideWithValue(deps.presentation),
+          ],
+          child: MaterialApp(
+            home: MediaQuery(
+              data: MediaQueryData(textScaler: TextScaler.linear(scale)),
+              child: Scaffold(
+                body: ListView(
+                  children: [
+                    for (final status in [
+                      DownloadStatus.running,
+                      DownloadStatus.paused,
+                      DownloadStatus.completed,
+                    ])
+                      DownloadCard(task: task('$name-${status.name}', status)),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+      for (final element in find.byType(Card).evaluate()) {
+        if (scale == 1) {
+          expect(
+            tester.getSize(find.byWidget(element.widget)).height,
+            lessThanOrEqualTo(104),
+          );
+        }
+      }
+      expect(
+        tester
+            .getSize(find.widgetWithIcon(IconButton, Icons.open_in_new))
+            .height,
+        greaterThanOrEqualTo(48),
+      );
+      expect(
+        tester.getSize(find.widgetWithIcon(IconButton, Icons.pause)).height,
+        greaterThanOrEqualTo(48),
+      );
+      await tester.tap(find.text('$name-running.bin'));
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.text('下载详情'), findsOneWidget);
+      expect(find.textContaining('$name-running.bin'), findsWidgets);
+      expect(find.textContaining('速度未知'), findsOneWidget);
+      await tester.tap(find.text('关闭'));
+      await tester.pump(const Duration(milliseconds: 400));
+    }
+  });
+
+  testWidgets('compact cached rows keep full details accessible', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(320, 900);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPhysicalSize);
+    const name = '很长的缓存文件名用于检查紧凑列表.apk';
+    const url = 'https://example.com/long/path/download.apk?version=12345';
+    await deps.saved.save(
+      SavedDownloadInput(
+        id: 'compact-cache',
+        url: url,
+        fileName: name,
+        directory: directory,
+      ),
+    );
+    await mount(tester, deps);
+    await tester.tap(find.byType(ChoiceChip).at(2));
+    await tester.pumpAndSettle();
+    expect(tester.getSize(find.byType(Card)).height, lessThanOrEqualTo(88));
+    expect(tester.takeException(), isNull);
+    await tester.tap(find.text(name));
+    await tester.pumpAndSettle();
+    expect(find.text('缓存详情'), findsOneWidget);
+    expect(find.textContaining('$url\n保存目录：Downloader'), findsOneWidget);
+  });
+
+  testWidgets('completed rows show one size and local completion time', (
+    tester,
+  ) async {
+    final finished = DateTime(2026, 11, 5, 8, 9);
+    final legacy = DateTime(2026, 11, 4, 7, 6);
+    final items = [
+      DownloadTask.fromJson({
+        ...task('new', DownloadStatus.completed).toJson(),
+        'totalBytes': 8192,
+        'completedAt': finished.toUtc().millisecondsSinceEpoch,
+        'updatedAt': finished
+            .add(const Duration(days: 1))
+            .toUtc()
+            .millisecondsSinceEpoch,
+      }),
+      DownloadTask.fromJson({
+        ...task('legacy', DownloadStatus.completed).toJson(),
+        'totalBytes': 8192,
+        'updatedAt': legacy.toUtc().millisecondsSinceEpoch,
+      }),
+    ];
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [dependenciesProvider.overrideWithValue(deps.presentation)],
+        child: MaterialApp(
+          home: Scaffold(
+            body: ListView(
+              children: [for (final item in items) DownloadCard(task: item)],
+            ),
+          ),
+        ),
+      ),
+    );
+    expect(find.text('8.0 KB'), findsNWidgets(2));
+    expect(find.text('2026-11-05 08:09'), findsOneWidget);
+    expect(find.text('2026-11-04 07:06'), findsOneWidget);
+    expect(find.textContaining('8.0 KB / 8.0 KB'), findsNothing);
+  });
+
+  testWidgets(
+    'clear completed action confirms and defaults to keeping local files',
+    (tester) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            dependenciesProvider.overrideWithValue(deps.presentation),
+            tasksProvider.overrideWith(
+              (ref) => Stream.value([task('done', DownloadStatus.completed)]),
+            ),
+          ],
+          child: const DownloadApplication(),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('清空已下载'), findsNothing);
+      await tester.tap(find.byType(ChoiceChip).at(1));
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('清空已下载'), findsOneWidget);
+      for (var attempt = 0; attempt < 2; attempt++) {
+        await tester.tap(find.byTooltip('清空已下载'));
+        await tester.pumpAndSettle();
+        expect(
+          tester.widget<CheckboxListTile>(find.byType(CheckboxListTile)).value,
+          false,
+        );
+        expect(find.text('同时删除本地已下载文件'), findsOneWidget);
+        await tester.tap(find.byType(CheckboxListTile));
+        await tester.pumpAndSettle();
+        expect(
+          tester.widget<CheckboxListTile>(find.byType(CheckboxListTile)).value,
+          true,
+        );
+        await tester.tap(find.text('取消'));
+        await tester.pumpAndSettle();
+        expect(storage.deletes, 0);
+        expect(find.text('done.bin'), findsOneWidget);
+      }
+      await tester.tap(find.byType(ChoiceChip).at(2));
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('清空已下载'), findsNothing);
+    },
+  );
+
   testWidgets('category switches keep chip bounds and add position stable', (
     tester,
   ) async {
@@ -269,6 +495,8 @@ void main() {
     await tester.pumpAndSettle();
     expect(engine.enqueues, 0);
     expect(deps.store.readSavedDownloads(), hasLength(1));
+    expect(deps.store.readSavedDownloads().single.fileName, isNull);
+    expect(find.text('a'), findsOneWidget);
     await tester.tap(find.byTooltip('缓存操作'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('修改缓存'));
@@ -314,9 +542,12 @@ void main() {
       expect(find.text('下载中 1'), findsOneWidget);
       expect(find.text('已完成 1'), findsOneWidget);
       expect(find.text('缓存 1'), findsOneWidget);
-      expect(find.text('8.0 KB / 总大小未知'), findsOneWidget);
-      expect(find.text('百分比未知'), findsOneWidget);
-      expect(find.text('速度未知 · 剩余时间未知'), findsOneWidget);
+      expect(find.textContaining('8.0 KB / 总大小未知'), findsOneWidget);
+      final progress = tester.widget<LinearProgressIndicator>(
+        find.byType(LinearProgressIndicator),
+      );
+      expect(progress.value, isNull);
+      expect(progress.semanticsValue, '百分比未知');
       await tester.tap(find.text('已完成 1'));
       await tester.pumpAndSettle();
       expect(find.text('done.bin'), findsOneWidget);

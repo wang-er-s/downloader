@@ -252,6 +252,7 @@ class _AppShellState extends ConsumerState<AppShell> {
             scrolledUnderElevation: 0,
             title: Text(page == 0 ? '下载' : '设置'),
             actions: [
+              if (page == 0 && category == 1) const ClearCompletedButton(),
               if (page == 0)
                 Padding(
                   padding: const EdgeInsets.only(right: 16),

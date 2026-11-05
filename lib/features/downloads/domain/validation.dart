@@ -75,6 +75,14 @@ String fileName(String value) {
   return value;
 }
 
+String downloadFileName(String url, String fallback) {
+  try {
+    return fileName(Uri.parse(url).pathSegments.last);
+  } catch (_) {
+    return fallback;
+  }
+}
+
 Map<String, Object?> jsonObject(Object? value) {
   if (value is! Map || value.keys.any((key) => key is! String)) {
     invalid(FailureCode.protocolMismatch);

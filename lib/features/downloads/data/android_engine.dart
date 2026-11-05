@@ -44,6 +44,7 @@ final class AndroidEngine implements DownloadEngine {
   }
 
   static const _methods = MethodChannel('downloader/android_engine');
+  static const _permissions = MethodChannel('downloader/permissions');
   final AppStore _store;
   final _events = StreamController<EngineEvent>.broadcast();
   late final StreamSubscription<dynamic> _subscription;
@@ -200,6 +201,20 @@ final class AndroidEngine implements DownloadEngine {
         (input.key != command.key ||
             input.directory.platform != DownloadPlatform.android)) {
       _conflict('staleExecution');
+    }
+    if (method == 'enqueue' || method == 'resume') {
+      final granted = await _permissions.invokeMethod<bool>(
+        'requestNotifications',
+      );
+      if (granted != true) {
+        throw AndroidEngineException(
+          DownloadFailure(
+            code: FailureCode.permissionDenied,
+            message: '请在系统设置中允许下载器发送通知后重试',
+          ),
+        );
+      }
+      if (_closed) _conflict('closed');
     }
     return _methods.invokeMethod<Object?>(method, {
       'protocolVersion': 1,

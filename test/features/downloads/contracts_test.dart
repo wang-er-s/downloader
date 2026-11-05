@@ -7,6 +7,40 @@ import 'package:downloader/features/settings/domain/app_settings.dart';
 import 'fixtures.dart';
 
 void main() {
+  test(
+    'cached names use safe decoded URL paths without changing saved input',
+    () {
+      for (final entry in {
+        'https://example.com/files/app.apk?token=secret#part': 'app.apk',
+        'https://example.com/files/%E4%B8%8B%E8%BD%BD.apk': '下载.apk',
+        'https://example.com/': 'download_cache',
+        'https://example.com/files/': 'download_cache',
+        'https://example.com/a%2Fb.apk': 'download_cache',
+        'https://example.com/CON.txt': 'download_cache',
+        'https://example.com/%ZZ': '%ZZ',
+      }.entries) {
+        final value = SavedDownload(
+          id: 'cache',
+          url: entry.key,
+          createdAt: now,
+          updatedAt: now,
+        );
+        expect(value.displayName, entry.value);
+        expect(value.fileName, isNull);
+        expect(SavedDownload.fromJson(value.toJson()).displayName, entry.value);
+      }
+      expect(
+        SavedDownload(
+          id: 'cache',
+          url: 'https://example.com/a.apk',
+          fileName: 'custom.apk',
+          createdAt: now,
+          updatedAt: now,
+        ).displayName,
+        'custom.apk',
+      );
+    },
+  );
   for (final url in [
     '',
     'file:///tmp/a',

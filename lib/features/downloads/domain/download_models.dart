@@ -669,6 +669,7 @@ final class DownloadTask {
     this.lastError,
     required DateTime createdAt,
     required DateTime updatedAt,
+    DateTime? completedAt,
     this.stagingRef,
     this.targetRef,
     this.engineReceipt,
@@ -682,7 +683,8 @@ final class DownloadTask {
        displayName = fileName(displayName),
        downloadedBytes = unsigned64(downloadedBytes),
        createdAt = createdAt.toUtc(),
-       updatedAt = updatedAt.toUtc() {
+       updatedAt = updatedAt.toUtc(),
+       completedAt = completedAt?.toUtc() {
     if (totalBytes != null) unsigned64(totalBytes!);
     if (effectiveUrl != null) downloadUrl(effectiveUrl!);
     if (requestedFileName != null) fileName(requestedFileName!);
@@ -708,6 +710,7 @@ final class DownloadTask {
   final DownloadFailure? lastError;
   final DateTime createdAt;
   final DateTime updatedAt;
+  final DateTime? completedAt;
   final String? stagingRef;
   final String? targetRef;
   final EngineReceipt? engineReceipt;
@@ -749,6 +752,12 @@ final class DownloadTask {
         jsonValue<int>(json, 'updatedAt'),
         isUtc: true,
       ),
+      completedAt: json['completedAt'] == null
+          ? null
+          : DateTime.fromMillisecondsSinceEpoch(
+              jsonValue<int>(json, 'completedAt'),
+              isUtc: true,
+            ),
       stagingRef: jsonOptional<String>(json, 'stagingRef'),
       targetRef: jsonOptional<String>(json, 'targetRef'),
       engineReceipt: json['engineReceipt'] == null
@@ -782,6 +791,7 @@ final class DownloadTask {
             'lastError': lastError?.toJson(),
             'createdAt': createdAt.toUtc().millisecondsSinceEpoch,
             'updatedAt': updatedAt.toUtc().millisecondsSinceEpoch,
+            'completedAt': completedAt?.millisecondsSinceEpoch,
             'stagingRef': stagingRef,
             'targetRef': targetRef,
             'engineReceipt': engineReceipt?.toJson(),

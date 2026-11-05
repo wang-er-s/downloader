@@ -46,6 +46,8 @@ String errorMessage(Object error) {
     FailureCode.publicationUncertain => '保存结果待核实。请检查目标目录后重试保存，不会重复创建文件。',
     FailureCode.cleanupFailure => '文件清理未完成，记录已保留。部分平台暂不支持安全删除现存文件，请核实后重试。',
     FailureCode.permissionDenied => '缺少目录或通知权限。请在系统设置中授权，或重新选择目录后重试。',
+    FailureCode.installPermissionRequired => '请在系统页面允许下载器安装未知应用，返回后再次点击打开。',
+    FailureCode.noHandler => '未找到能打开此文件的应用，请安装相应应用后重试。',
     FailureCode.persistenceFailure => '状态同步或保存失败，请重试。请勿假定操作已完整保存。',
     FailureCode.backgroundRestricted => '系统限制了后台下载，请回到前台并检查系统权限后重试。',
     FailureCode.invalidInput => '链接或文件名无效，请检查后重试。',
@@ -125,6 +127,17 @@ class DownloadsController extends Notifier<OperationState> {
     id,
     () => dependencies.downloads.deleteCompleted(id, deleteFile: file),
   );
+  Future<bool> clearCompleted(List<String> ids, bool deleteFile) {
+    if (state.busy.isNotEmpty) return Future.value(false);
+    final downloads = dependencies.downloads;
+    return run('clearCompleted', () async {
+      for (final id in ids) {
+        await downloads.deleteCompleted(id, deleteFile: deleteFile);
+      }
+      return null;
+    });
+  }
+
   Future<bool> create(CreateDownload input) =>
       run('create', () => dependencies.downloads.create(input));
   Future<bool> save(SavedDownloadInput input) =>

@@ -62,6 +62,8 @@ final class SavedDownload {
   final DateTime createdAt;
   final DateTime updatedAt;
 
+  String get displayName => fileName ?? downloadFileName(url, 'download_$id');
+
   factory SavedDownload.fromJson(Map<String, Object?> json) {
     jsonVersion(json, field: 'version');
     return SavedDownload(

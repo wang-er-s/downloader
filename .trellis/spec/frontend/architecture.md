@@ -210,6 +210,7 @@ Future<bool> cancel(String id) => run(
 - Manifest 声明 INTERNET、FOREGROUND_SERVICE、FOREGROUND_SERVICE_DATA_SYNC、POST_NOTIFICATIONS；Service exported=false、foregroundServiceType=dataSync、START_NOT_STICKY，无 boot receiver、WorkManager 或自动网络重试。按需求允许明文 HTTP，HTTPS 保持默认证书验证。API<26 拒绝服务；候选最低 API29 未因本轮修改。
 - Runtime 与 Service 共用同一 ServiceLifecycle；token、实例、ready、idle epoch 在短同步临界区核验。pending 只决定是否请求系统启动，失败同步撤销 grant。系统接受 startForegroundService 后，即使 token 被 PAUSE/CANCEL 撤销，每次交付仍由 deliver 先实际 startForeground，再由 foreground 校验下载授权；promotion 本身不创建 grant、ready 或 worker，空/旧/重复 Intent 不联网。
 - POST_NOTIFICATIONS 不是 Android 系统启动 FGS 的前置条件，仍须提供通知。产品策略在 Runtime 请求前及 Service promotion 后检查权限：拒绝时阻止传输并保存 permissionDenied。不得在已接受的启动交付中因通知拒绝或 token 撤销而跳过 promotion、直接 stopSelf，否则可能触发 ForegroundServiceDidNotStartInTimeException。
+- MainActivity 的 `downloader/permissions.requestNotifications` 无参数并返回 bool：API33+ 未授权时调用系统 requestPermissions，并发请求共用一次弹窗；低版本或已授权直接 true，Activity 脱离引擎时未决请求返回 false。Dart 仅在显式 enqueue/resume 前等待 true，拒绝或空回复返回 permissionDenied，等待期间引擎关闭不发送执行命令；inspect/pause/cancel/ack 不请求权限。Runtime/Service 原有权限重验保留，授权弹窗不授权自动重排下载。
 - promotion 失败立即发所属 Stop，未 claim 的 grant 移除，已 claim 的保留至 destroy 汇总；不影响另一实例的 grant。Service catch 在 destroy 前调用 acceptsFailure 核对当前 token 的实例归属，只有允许时才 launchFailed；restrict 仅使用 destroy 返回的 owned 集合，旧实例失败不得撤销新实例已 claim、尚未 ready 的授权。实际平台拒绝不自动重试，也不保证免于系统终止。
 - 新 enqueue 使旧 idle 票据失效；destroy/timeout 只失效所属实例 grant，并先发布所属 worker 停止标志，后排日志保存。退休实例不绑定新授权。timeout 整体退休所属实例时无参 stopSelf()；无效/重复 Intent 只按 startId 停止不属于当前 owner 的实例，不误停有效新请求。
 - 生命周期锁内不访问 SQLite、不等待 Future 或网络退出。API37 已验证指定启动交错，但标准 IPC 的最坏延迟和其他 API/系统限制仍未验收；不能以短临界区假设替代平台证据。
@@ -249,7 +250,7 @@ Future<bool> cancel(String id) => run(
 | 网络断开/超时、写入/force/close、日志失败 | networkUnavailable/timeout、fileWriteFailure、persistenceFailure；不虚报暂停成功 |
 | 内部恢复缺/弱/变化 ETag、旧 proof/worker 版本、坏 prefix/Range、200/416/redirect | restartRequired 或对应 stateConflict；不创建 candidate，不覆盖原件、不从零重发 |
 | 恢复复制/EOF/force/close/候选登记失败 | 保留原件、旧 proof 与已登记 candidate；不认证内部 staged 或用户完成 |
-| 通知权限拒绝、后台启动受限、系统 timeout/destroy | permissionDenied 或 backgroundRestricted；已接受的启动先履行 promotion，再拒绝下载授权；失败只停止/保存所属任务且不重试，通知请求 UI 未实现 |
+| 通知权限拒绝、后台启动受限、系统 timeout/destroy | 显式下载/继续先请求通知授权，拒绝时不发送执行命令；Runtime/Service 仍重验，已接受的启动先履行 promotion，再拒绝下载授权；失败只停止/保存所属任务且不重试 |
 | 取消归属冲突、删除/完成保存失败 | stateConflict 或 cleanupFailure；不虚报清理完成，保留可重放意图和诊断 |
 | 普通/旧 ack；非法非空 releaseResumeRefs | 普通/旧确认保源；仅经完整授权的当前 completed 集合允许显式释放，见文件契约 |
 | 公开 resume 无安全 proof/强 ETag、known total 且 offset==total | stateConflict/restartRequired；不从零请求、不自动发布 |
@@ -265,6 +266,8 @@ Future<bool> cancel(String id) => run(
 ### 6. Tests Required
 
 以下记录旧 v7/FGS 阶段历史：独立 Gradle `:app:testDebugUnitTest :app:connectedDebugAndroidTest :app:assembleDebug` 退出0，93 JVM、analyze/debug APK及API37设备通过；Dart沿用前轮102项。历史证据 `/tmp/android-fgs-race-independent-gradle.log`、`/tmp/android-fgs-race-independent-jvm/`、`/tmp/android-fgs-race-independent-analyze.log`。当前 v8 的最新93 JVM强制重跑通过、22 instrumentation仅编译，不继承旧设备通过声明；详见[文件契约](file-storage.md)。
+
+通知授权新增 Dart 通道回归覆盖 enqueue/resume 等待授权、拒绝/空回复零执行和等待期间 close；主机 fake 不证明 Android 系统弹窗、拒绝后重试或 Activity 重建已实机通过。
 
 - 生产 Lifecycle/Stop/Coordinator 确定性回调/latch：旧 idle/new enqueue/旧 destroy、新旧实例、启动失败立即撤权、foreground/ready 间失效、同实例多个 start 的 timeout、阻塞断连与取消优先。
 - 真实 loopback HTTP/文件：最多两个 worker、未知长度、持久后事件、幂等命令、失败 pause、cancel 优先、终态保存失败不饿死其他下载、显式补存无新 HTTP、提交结果丢失/并发补存/身份变化；Journal 为 host fake，不能称真实 Android SQLite。

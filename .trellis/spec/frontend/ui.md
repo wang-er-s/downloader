@@ -30,6 +30,7 @@ Future<bool> retryPublication(String id);
 Future<bool> open(String id);
 Future<bool> redownload(String id);
 Future<bool> deleteCompleted(String id, bool file);
+Future<bool> clearCompleted(List<String> ids, bool deleteFile);
 Future<bool> create(CreateDownload input);
 Future<bool> save(SavedDownloadInput input);
 Future<bool> startSaved(String id);
@@ -49,15 +50,22 @@ Future<AppExitResponse> requestExit();
 ## 3. Contracts
 
 - main先ensureInitialized，再runApp(DownloaderApp)。DownloaderApp.initialize默认AppDependencies.open；FutureBuilder提供加载、初始化错误与显式重试，失败不自动循环、删库或显示伪空集合。同步抛错经Future.sync捕获，retry Future提前挂错误监听，避免下一帧前未处理错误。
-- AppDependencies.open顺序：AppStore.openPersistent（四表v2）→ AndroidEngine.open(store:)或PluginEngine.open(store:) → platformFileStorage（Plugin路径注入engine.publicationJournal）→ SettingsRepository(defaultDownloadDirectory()) → application-support/staging_v1 → DownloadRepository.initialize → SavedDownloadRepository。失败对已取得settings、engine、store分别尽力释放，保留初始化首异常；PluginEngine内部失败清理及幂等close见插件规范。
+- AppDependencies.open顺序：AppStore.openPersistent（四表v3）→ AndroidEngine.open(store:)或PluginEngine.open(store:) → platformFileStorage（Plugin路径注入engine.publicationJournal）→ SettingsRepository(defaultDownloadDirectory()) → application-support/staging_v1 → DownloadRepository.initialize → SavedDownloadRepository。失败对已取得settings、engine、store分别尽力释放，保留初始化首异常；PluginEngine内部失败清理及幂等close见插件规范。
 - app将`.presentation`命名record通过ProviderScope override注入；feature只依赖具体Repository/FileStorage类型，禁止import app/dependencies.dart或重建应用依赖。页面销毁只退订/释放界面资源，不取消任务或关闭Engine/Store。AppDependencies.close为应用所有者入口，不保证其本身重复调用幂等。
 - 三个仓库流是业务显示唯一数据源：tasks来自watchTasks、saved来自watchSavedDownloads、settings来自watchSettings。分类/数量由流派生；完成须为已发布completed，paused/failed/waitingRecovery/publishing仍属下载中。Notifier不存任务/配置/主题副本，不直接读SQL、插件或订阅Engine事件。输入、当前分类、导航留Widget。
 - run同键busy或退出锁且非duringExit时返回false；接受操作时登记busy，成功返回true，捕获失败写中文error并返回false。busy/error是局部反馈，不提前修改业务状态。异步完成后只有ref.mounted才写state，销毁后Future仍结算；成功结算保留其他并发失败的error。
 - pause使用任务id且duringExit=true；cancel使用独立`cancel:<id>`且duringExit=true，普通任务busy及退出等待仍保留取消菜单入口，同cancel键阻止重复提交。持久取消优先、迟到发布及uncertain清理由Repository处理，UI不得点击取消就移除记录。
 - 目录选择经注入storage；null表示取消且保留原值，选择错误可反馈，不能当永久授权成功。保存配置不下载，发起/重下生成提交id并走Repository；删除默认仅记录，删文件需明确选择。确认不能绕过restartUnsupported或平台安全拒删。
-- totalBytes=null时显示真实累计字节和不确定进度，不显示虚构比例。当前Repository未向UI提供合法单调样本，所有未完成项速度/ETA显示未知，禁止墙钟差分或旁路Engine补数。
+- totalBytes=null时显示真实累计字节和不确定进度，不显示虚构比例。当前Repository未向UI提供合法单调样本，速度/ETA在下载详情中显示未知，紧凑列表不重复显示未知占位；禁止墙钟差分或旁路Engine补数。
+- 下载/完成/缓存列表使用紧凑卡片：横向12/纵向8内边距、卡片间隔8；文件名一行省略，下载状态与字节/已知比例合并，未完成项底部保留进度条。缓存文件名/URL点击查看完整详情和保存目录。错误、待保存操作及busy反馈仍可见，不固定卡片高度；文字放大允许信息自然换行，详情和图标操作保留至少48逻辑像素点击高度。
+- 已完成列表只显示 downloadedBytes 一个大小，次行显示 completedAt 的本地 YYYY-MM-DD HH:mm，缺少历史完成时间时回退 updatedAt；不展示大小/大小或进度百分比。日期保留完整可换行且有完成时间语义，下载中仍显示累计/总量。
+- 已完成列表按 completedAt ?? updatedAt 降序展示，最新完成在前；仅排序分类过滤后的新列表，不修改仓库快照，下载中/缓存沿用各自原有顺序。
 - macOS [AppDelegate](../../../macos/Runner/AppDelegate.swift)保留FlutterAppDelegate启动及原窗口委托转发。窗口close与菜单Quit合流，pending合并回调且每次只回复一次；`downloader/app_lifecycle`的`requestExit`无业务参数，Dart回复bool。Swift只接受CFBoolean类型且true放行，NSNumber数字、false、错误或缺回复均拒绝，approved后重入放行。
 - Dart的AppLifecycleListener.onExitRequested与通道进入同一requestExit。并发退出或已有busy拒绝，确认期间锁exit阻止新提交/继续，允许pause/cancel。活动running/queued经确认后逐项等待实际pause及保存，publishing/cancelling/deleting拒绝退出。确认后检查mounted，最终重新读取watchTasks首快照，同时重查除exit外的busy及全部活动状态；任一存在则拒绝。失败解除退出锁，批准保留锁；onResume显式synchronize。协议没有系统红钮/Quit实际操作证据，Windows原生退出未接线。
+
+- 缓存未填文件名时显示 SavedDownload.displayName：共享 downloadFileName 取 URL 最后一段已解码路径，忽略查询/片段并经可移植文件名校验；无法取名回退 download_<id>，手填名优先。保留原 fileName=null 和 URL，不在显示时改写配置或联网。
+- 已完成分类标题栏提供「清空已下载」图标；空列表/读取中/任一操作busy时禁用。确认框复用 DeleteDownloadDialog(clearAll:true)，「同时删除本地已下载文件」每次打开默认false；取消不执行。确认仅处理打开确认框时的 completed ID 快照，新完成/活动/缓存不包含在内。
+- clearCompleted 通过 run('clearCompleted') 按序调用原 Repository.deleteCompleted，保留完整 ack、文件归属和失败校验；一项失败即停止并显示原错误，保留失败及尚未处理项，不宣称全部成功。批处理中已完成卡片的单项变更操作禁用，运行中任务仍可取消，不绕过退出锁。
 
 ## 4. Validation & Error Matrix
 
